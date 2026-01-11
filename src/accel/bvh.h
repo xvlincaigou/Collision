@@ -59,13 +59,15 @@ public:
     [[nodiscard]] bool hasDeviceData() const { return m_deviceBuilder != nullptr; }
     [[nodiscard]] gpu::DeviceTreeBuilder* deviceBuilder() const { return m_deviceBuilder.get(); }
 
-private:
+public:
     struct PrimitiveInfo 
     {
         BoundingBox3D extent;
         Point3 center;
         IntType faceIdx = -1;
     };
+
+private:
 
     IntType recursiveBuild(IntType rangeStart, IntType rangeEnd, IntType level);
     BoundingBox3D computeRangeBounds(IntType rangeStart, IntType rangeEnd) const;

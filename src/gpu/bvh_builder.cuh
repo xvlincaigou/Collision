@@ -92,6 +92,8 @@ public:
     [[nodiscard]] IntType rootNode() const { return 0; }
 
 private:
+    void allocateDeviceMemory();
+    void uploadInputData(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces);
     void computePrimitiveBounds();
     void computeMortonCodes();
     void sortByMorton();

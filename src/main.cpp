@@ -1,5 +1,6 @@
 /*
  * Physics Simulation Entry Point
+ * Restructured with state machine pattern and modular initialization
  */
 #include <chrono>
 #include <cmath>
@@ -10,26 +11,17 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <functional>
+#include <array>
 
 #include "simulation/simulator.h"
 
 namespace {
 
-struct ExecutionParams 
+/* ========== Configuration Data Types ========== */
+
+struct PropertyRanges
 {
-    std::string geometryFile = "assets/diamond.obj";
-    std::string outputFolder = "output";
-    int entityCount = 20;
-    int frameLimit = 200;
-    float spawnMargin = 3.0f;
-    float minHeight = 2.0f;
-    bool verboseOutput = true;
-    bool writeFrames = true;
-    bool performanceMode = false;
-
-    phys3d::Point3 domainMin{-10.0f, -10.0f, 0.0f};
-    phys3d::Point3 domainMax{10.0f, 10.0f, 10.0f};
-
     float massLo = 0.5f;
     float massHi = 3.0f;
     float scaleLo = 0.5f;
@@ -42,363 +34,453 @@ struct ExecutionParams
     float velocityHi = 3.0f;
 };
 
-void displayHelp(const char* executableName) 
+struct DomainSettings
 {
-    std::cout << "Usage: " << executableName << " [options]\n"
-              << "  -m, --mesh <path>       Path to mesh file (default: assets/diamond.obj)\n"
-              << "  -n, --num-objects <n>   Number of objects (default: 20)\n"
-              << "  -f, --frames <n>        Number of frames (default: 200)\n"
-              << "  -o, --output <dir>      Output directory (default: output)\n"
-              << "  --mass <min> <max>      Mass range (default: 0.5 3.0)\n"
-              << "  --scale <min> <max>     Scale/radius range (default: 0.5 2.0)\n"
-              << "  --restitution <min> <max>  Bounciness range (default: 0.2 0.9)\n"
-              << "  --friction <min> <max>  Friction range (default: 0.3 0.8)\n"
-              << "  --velocity <min> <max>  Initial velocity range (default: -3.0 3.0)\n"
-              << "  --no-export             Skip frame export (for benchmarking)\n"
-              << "  --benchmark             Benchmark mode: minimal output, timing only\n"
-              << "  -q, --quiet             Quiet mode: suppress per-frame output\n"
-              << "  -h, --help              Show this help message\n"
-              << std::endl;
-}
+    phys3d::Point3 boundsMin{-10.0f, -10.0f, 0.0f};
+    phys3d::Point3 boundsMax{10.0f, 10.0f, 10.0f};
+    float spawnMargin = 3.0f;
+    float minSpawnHeight = 2.0f;
+};
 
-bool processArguments(int argc, char* argv[], ExecutionParams& params) 
+struct ExecutionSettings
 {
-    for (int idx = 1; idx < argc; ++idx) 
-    {
-        std::string token = argv[idx];
+    std::string geometryFile = "assets/diamond.obj";
+    std::string outputFolder = "output";
+    int entityCount = 20;
+    int frameLimit = 200;
+    bool verboseOutput = true;
+    bool writeFrames = true;
+    bool performanceMode = false;
+    
+    PropertyRanges properties;
+    DomainSettings domain;
+};
 
-        if (token == "-h" || token == "--help") 
-        {
-            displayHelp(argv[0]);
-            return false;
-        }
-        else if ((token == "-m" || token == "--mesh") && idx + 1 < argc) 
-        {
-            params.geometryFile = argv[++idx];
-        }
-        else if ((token == "-n" || token == "--num-objects") && idx + 1 < argc) 
-        {
-            params.entityCount = std::stoi(argv[++idx]);
-        }
-        else if ((token == "-f" || token == "--frames") && idx + 1 < argc) 
-        {
-            params.frameLimit = std::stoi(argv[++idx]);
-        }
-        else if ((token == "-o" || token == "--output") && idx + 1 < argc) 
-        {
-            params.outputFolder = argv[++idx];
-        }
-        else if (token == "--mass" && idx + 2 < argc) 
-        {
-            params.massLo = std::stof(argv[++idx]);
-            params.massHi = std::stof(argv[++idx]);
-        }
-        else if (token == "--scale" && idx + 2 < argc) 
-        {
-            params.scaleLo = std::stof(argv[++idx]);
-            params.scaleHi = std::stof(argv[++idx]);
-        }
-        else if (token == "--restitution" && idx + 2 < argc) 
-        {
-            params.bouncinessLo = std::stof(argv[++idx]);
-            params.bouncinessHi = std::stof(argv[++idx]);
-        }
-        else if (token == "--friction" && idx + 2 < argc) 
-        {
-            params.frictionLo = std::stof(argv[++idx]);
-            params.frictionHi = std::stof(argv[++idx]);
-        }
-        else if (token == "--velocity" && idx + 2 < argc) 
-        {
-            params.velocityLo = std::stof(argv[++idx]);
-            params.velocityHi = std::stof(argv[++idx]);
-        }
-        else if (token == "--no-export") 
-        {
-            params.writeFrames = false;
-        }
-        else if (token == "--benchmark") 
-        {
-            params.performanceMode = true;
-            params.verboseOutput = false;
-            params.writeFrames = false;
-        }
-        else if (token == "-q" || token == "--quiet") 
-        {
-            params.verboseOutput = false;
-        }
-        else 
-        {
-            std::cerr << "[ERROR] Unknown argument: " << token << std::endl;
-            displayHelp(argv[0]);
-            return false;
-        }
-    }
-    return true;
-}
+struct TimingData
+{
+    double setupMs = 0.0;
+    double simulationMs = 0.0;
+    
+    double totalMs() const { return setupMs + simulationMs; }
+    double avgFrameMs(int frames) const { return simulationMs / frames; }
+    double fps(int frames) const { return 1000.0 / avgFrameMs(frames); }
+};
 
-class PseudoRandomSource 
+/* ========== Random Number Generation ========== */
+
+class UniformGenerator
 {
 public:
-    static PseudoRandomSource& shared() 
+    static UniformGenerator& instance()
     {
-        static PseudoRandomSource instance;
-        return instance;
+        static UniformGenerator gen;
+        return gen;
     }
 
-    void setSeed(unsigned int seed) 
+    void resetSeed(unsigned int seed) { m_rng.seed(seed); }
+
+    float uniform(float lo, float hi)
     {
-        m_engine.seed(seed);
+        return std::uniform_real_distribution<float>(lo, hi)(m_rng);
     }
 
-    float randomInRange(float lo, float hi) 
+    phys3d::Rotation4 uniformRotation()
     {
-        std::uniform_real_distribution<float> distribution(lo, hi);
-        return distribution(m_engine);
-    }
-
-    phys3d::Rotation4 randomRotation() 
-    {
-        constexpr float kTwoPi = 6.28318530717958647692f;
-
-        float r1 = randomInRange(0.0f, 1.0f);
-        float r2 = randomInRange(0.0f, 1.0f);
-        float r3 = randomInRange(0.0f, 1.0f);
-
-        float sqrtOneMinusR1 = std::sqrt(1.0f - r1);
-        float sqrtR1 = std::sqrt(r1);
-
+        constexpr float kPi2 = 6.28318530717958647692f;
+        
+        const float u1 = uniform(0.0f, 1.0f);
+        const float u2 = uniform(0.0f, 1.0f);
+        const float u3 = uniform(0.0f, 1.0f);
+        
+        const float s1 = std::sqrt(1.0f - u1);
+        const float s2 = std::sqrt(u1);
+        
         return phys3d::Rotation4(
-                   sqrtOneMinusR1 * std::sin(kTwoPi * r2),
-                   sqrtOneMinusR1 * std::cos(kTwoPi * r2),
-                   sqrtR1 * std::sin(kTwoPi * r3),
-                   sqrtR1 * std::cos(kTwoPi * r3))
-            .normalized();
+            s1 * std::sin(kPi2 * u2),
+            s1 * std::cos(kPi2 * u2),
+            s2 * std::sin(kPi2 * u3),
+            s2 * std::cos(kPi2 * u3)).normalized();
     }
 
 private:
-    PseudoRandomSource() : m_engine(42) {}
-    std::mt19937 m_engine;
+    UniformGenerator() : m_rng(42) {}
+    std::mt19937 m_rng;
 };
 
-bool prepareOutputFolder(const std::string& folderPath) 
+/* ========== Command Line Parsing ========== */
+
+class ArgumentProcessor
+{
+public:
+    explicit ArgumentProcessor(int argc, char* argv[])
+        : m_argc(argc), m_argv(argv), m_idx(1), m_valid(true) {}
+
+    bool process(ExecutionSettings& settings)
+    {
+        while (m_idx < m_argc && m_valid)
+        {
+            const std::string token = m_argv[m_idx];
+            
+            if (token == "-h" || token == "--help")
+            {
+                printUsage();
+                return false;
+            }
+            
+            m_valid = dispatchArgument(token, settings);
+            ++m_idx;
+        }
+        
+        return m_valid;
+    }
+
+private:
+    void printUsage()
+    {
+        std::cout << "Usage: " << m_argv[0] << " [options]\n"
+                  << "  -m, --mesh <path>       Path to mesh file (default: assets/diamond.obj)\n"
+                  << "  -n, --num-objects <n>   Number of objects (default: 20)\n"
+                  << "  -f, --frames <n>        Number of frames (default: 200)\n"
+                  << "  -o, --output <dir>      Output directory (default: output)\n"
+                  << "  --mass <min> <max>      Mass range (default: 0.5 3.0)\n"
+                  << "  --scale <min> <max>     Scale/radius range (default: 0.5 2.0)\n"
+                  << "  --restitution <min> <max>  Bounciness range (default: 0.2 0.9)\n"
+                  << "  --friction <min> <max>  Friction range (default: 0.3 0.8)\n"
+                  << "  --velocity <min> <max>  Initial velocity range (default: -3.0 3.0)\n"
+                  << "  --no-export             Skip frame export (for benchmarking)\n"
+                  << "  --benchmark             Benchmark mode: minimal output, timing only\n"
+                  << "  -q, --quiet             Quiet mode: suppress per-frame output\n"
+                  << "  -h, --help              Show this help message\n"
+                  << std::endl;
+    }
+
+    bool dispatchArgument(const std::string& token, ExecutionSettings& settings)
+    {
+        // Map of argument handlers
+        using Handler = std::function<bool(ExecutionSettings&)>;
+        
+        if (token == "-m" || token == "--mesh")
+            return parseString(settings.geometryFile);
+        if (token == "-n" || token == "--num-objects")
+            return parseInt(settings.entityCount);
+        if (token == "-f" || token == "--frames")
+            return parseInt(settings.frameLimit);
+        if (token == "-o" || token == "--output")
+            return parseString(settings.outputFolder);
+        if (token == "--mass")
+            return parseFloatPair(settings.properties.massLo, settings.properties.massHi);
+        if (token == "--scale")
+            return parseFloatPair(settings.properties.scaleLo, settings.properties.scaleHi);
+        if (token == "--restitution")
+            return parseFloatPair(settings.properties.bouncinessLo, settings.properties.bouncinessHi);
+        if (token == "--friction")
+            return parseFloatPair(settings.properties.frictionLo, settings.properties.frictionHi);
+        if (token == "--velocity")
+            return parseFloatPair(settings.properties.velocityLo, settings.properties.velocityHi);
+        if (token == "--no-export")
+        {
+            settings.writeFrames = false;
+            return true;
+        }
+        if (token == "--benchmark")
+        {
+            settings.performanceMode = true;
+            settings.verboseOutput = false;
+            settings.writeFrames = false;
+            return true;
+        }
+        if (token == "-q" || token == "--quiet")
+        {
+            settings.verboseOutput = false;
+            return true;
+        }
+        
+        std::cerr << "[ERROR] Unknown argument: " << token << std::endl;
+        return false;
+    }
+
+    bool parseString(std::string& target)
+    {
+        if (m_idx + 1 >= m_argc) return false;
+        target = m_argv[++m_idx];
+        return true;
+    }
+
+    bool parseInt(int& target)
+    {
+        if (m_idx + 1 >= m_argc) return false;
+        target = std::stoi(m_argv[++m_idx]);
+        return true;
+    }
+
+    bool parseFloatPair(float& lo, float& hi)
+    {
+        if (m_idx + 2 >= m_argc) return false;
+        lo = std::stof(m_argv[++m_idx]);
+        hi = std::stof(m_argv[++m_idx]);
+        return true;
+    }
+
+    int m_argc;
+    char** m_argv;
+    int m_idx;
+    bool m_valid;
+};
+
+bool ensureDirectoryExists(const std::string& path)
 {
     namespace fs = std::filesystem;
-    std::error_code errorCode;
-    fs::create_directories(folderPath, errorCode);
-    if (errorCode) 
+    std::error_code ec;
+    fs::create_directories(path, ec);
+    
+    if (ec)
     {
-        std::cerr << "[ERROR] Could not create output directory: " << folderPath
-                  << " (" << errorCode.message() << ")" << std::endl;
+        std::cerr << "[ERROR] Could not create directory: " << path
+                  << " (" << ec.message() << ")" << std::endl;
         return false;
     }
     return true;
 }
 
-std::string generateFramePath(const std::string& folder, int frameNum) 
+std::string buildFramePath(const std::string& folder, int frameNum)
 {
-    std::ostringstream pathBuilder;
-    pathBuilder << folder << "/frame_" << std::setw(4) << std::setfill('0') << frameNum << ".obj";
-    return pathBuilder.str();
+    std::ostringstream oss;
+    oss << folder << "/frame_" << std::setw(4) << std::setfill('0') << frameNum << ".obj";
+    return oss.str();
 }
 
-using TimeClock = std::chrono::high_resolution_clock;
-using TimeDelta = std::chrono::duration<double, std::milli>;
+/* ========== Output Formatting ========== */
 
-struct PerformanceMetrics 
+class ResultReporter
 {
-    double setupDurationMs = 0.0;
-    double simulationDurationMs = 0.0;
-    double totalDurationMs = 0.0;
-    double averageFrameMs = 0.0;
-    int totalFrames = 0;
-    int totalEntities = 0;
-    std::string geometryFile;
+public:
+    static void displayTimings(const ExecutionSettings& settings, const TimingData& timing)
+    {
+        std::cout << "\n========== TIMING RESULTS ==========\n"
+                  << std::fixed << std::setprecision(3)
+                  << "Mesh:              " << settings.geometryFile << "\n"
+                  << "Objects:           " << settings.entityCount << "\n"
+                  << "Frames:            " << settings.frameLimit << "\n"
+                  << "------------------------------------\n"
+                  << "Setup time:        " << timing.setupMs << " ms\n"
+                  << "Simulation time:   " << timing.simulationMs << " ms\n"
+                  << "Total time:        " << timing.totalMs() << " ms\n"
+                  << "Avg frame time:    " << timing.avgFrameMs(settings.frameLimit) << " ms\n"
+                  << "FPS:               " << timing.fps(settings.frameLimit) << "\n"
+                  << "====================================\n";
+    }
+
+    static void outputCSVLine(const ExecutionSettings& settings, const TimingData& timing)
+    {
+        std::cout << settings.geometryFile << ","
+                  << settings.entityCount << ","
+                  << settings.frameLimit << ","
+                  << std::fixed << std::setprecision(3)
+                  << timing.setupMs << ","
+                  << timing.simulationMs << ","
+                  << timing.totalMs() << ","
+                  << timing.avgFrameMs(settings.frameLimit) << ","
+                  << timing.fps(settings.frameLimit) << std::endl;
+    }
 };
 
-void displayMetrics(const PerformanceMetrics& metrics) 
+/* ========== Entity Spawner ========== */
+
+class EntitySpawner
 {
-    std::cout << "\n========== TIMING RESULTS ==========\n";
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "Mesh:              " << metrics.geometryFile << "\n";
-    std::cout << "Objects:           " << metrics.totalEntities << "\n";
-    std::cout << "Frames:            " << metrics.totalFrames << "\n";
-    std::cout << "------------------------------------\n";
-    std::cout << "Setup time:        " << metrics.setupDurationMs << " ms\n";
-    std::cout << "Simulation time:   " << metrics.simulationDurationMs << " ms\n";
-    std::cout << "Total time:        " << metrics.totalDurationMs << " ms\n";
-    std::cout << "Avg frame time:    " << metrics.averageFrameMs << " ms\n";
-    std::cout << "FPS:               " << (1000.0 / metrics.averageFrameMs) << "\n";
-    std::cout << "====================================\n";
-}
+public:
+    explicit EntitySpawner(const ExecutionSettings& settings)
+        : m_settings(settings) {}
 
-void outputCSV(const PerformanceMetrics& metrics) 
-{
-    std::cout << metrics.geometryFile << ","
-              << metrics.totalEntities << ","
-              << metrics.totalFrames << ","
-              << std::fixed << std::setprecision(3)
-              << metrics.setupDurationMs << ","
-              << metrics.simulationDurationMs << ","
-              << metrics.totalDurationMs << ","
-              << metrics.averageFrameMs << ","
-              << (1000.0 / metrics.averageFrameMs) << std::endl;
-}
-
-bool configureSimulation(phys3d::SimulationController& controller, const ExecutionParams& params) 
-{
-    controller.initialize();
-    controller.setBoundaryLimits(params.domainMin, params.domainMax);
-    controller.setIterationLimit(20);
-    controller.setConvergenceThreshold(1e-3f);
-
-    auto& rng = PseudoRandomSource::shared();
-    rng.setSeed(42);
-
-    for (int entityIdx = 0; entityIdx < params.entityCount; ++entityIdx) 
+    bool spawnEntity(phys3d::SimulationController& controller, int entityIdx)
     {
-        float mass = rng.randomInRange(params.massLo, params.massHi);
-        float scale = rng.randomInRange(params.scaleLo, params.scaleHi);
-        float bounciness = rng.randomInRange(params.bouncinessLo, params.bouncinessHi);
-        float friction = rng.randomInRange(params.frictionLo, params.frictionHi);
+        auto& rng = UniformGenerator::instance();
+        const auto& props = m_settings.properties;
+        const auto& domain = m_settings.domain;
 
-        std::string entityId = "entity_" + std::to_string(entityIdx);
-        phys3d::DynamicEntity& entity = controller.createEntity(entityId, params.geometryFile,
-                                                                 mass, scale, bounciness, friction);
+        // Generate random properties
+        const float mass = rng.uniform(props.massLo, props.massHi);
+        const float scale = rng.uniform(props.scaleLo, props.scaleHi);
+        const float bounciness = rng.uniform(props.bouncinessLo, props.bouncinessHi);
+        const float friction = rng.uniform(props.frictionLo, props.frictionHi);
 
-        if (!entity.hasSurface()) 
+        // Create entity
+        const std::string entityId = "entity_" + std::to_string(entityIdx);
+        phys3d::DynamicEntity& entity = controller.createEntity(
+            entityId, m_settings.geometryFile, mass, scale, bounciness, friction);
+
+        if (!entity.hasSurface())
         {
             std::cerr << "[ERROR] Failed to load mesh for entity " << entityIdx
-                      << ". Check file path: " << params.geometryFile << std::endl;
+                      << ". Check file path: " << m_settings.geometryFile << std::endl;
             return false;
         }
 
-        float effectiveMargin = params.spawnMargin * scale;
+        // Generate spawn position
+        const float margin = domain.spawnMargin * scale;
+        const float posX = rng.uniform(domain.boundsMin.x() + margin, domain.boundsMax.x() - margin);
+        const float posY = rng.uniform(domain.boundsMin.y() + margin, domain.boundsMax.y() - margin);
+        const float posZ = rng.uniform(domain.minSpawnHeight + margin, domain.boundsMax.z() - margin);
 
-        float posX = rng.randomInRange(params.domainMin.x() + effectiveMargin,
-                                        params.domainMax.x() - effectiveMargin);
-        float posY = rng.randomInRange(params.domainMin.y() + effectiveMargin,
-                                        params.domainMax.y() - effectiveMargin);
-        float posZ = rng.randomInRange(params.minHeight + effectiveMargin,
-                                        params.domainMax.z() - effectiveMargin);
+        // Generate initial velocity
+        const float velX = rng.uniform(props.velocityLo, props.velocityHi);
+        const float velY = rng.uniform(props.velocityLo, props.velocityHi);
+        const float velZ = rng.uniform(props.velocityLo, props.velocityHi);
 
-        float velX = rng.randomInRange(params.velocityLo, params.velocityHi);
-        float velY = rng.randomInRange(params.velocityLo, params.velocityHi);
-        float velZ = rng.randomInRange(params.velocityLo, params.velocityHi);
-
+        // Configure kinematic state
         phys3d::EntityState state = entity.kinematic();
         state.translation = phys3d::Point3(posX, posY, posZ);
-        state.orientation = rng.randomRotation();
+        state.orientation = rng.uniformRotation();
         state.velocity = phys3d::Point3(velX, velY, velZ);
-
         entity.assignKinematic(state);
 
-        if (params.verboseOutput && !params.performanceMode) 
+        // Log if verbose
+        if (m_settings.verboseOutput && !m_settings.performanceMode)
         {
             std::cout << "[INFO] Entity " << entityIdx << ": scale=" << scale
                       << ", mass=" << mass << ", restitution=" << bounciness
                       << ", friction=" << friction << std::endl;
         }
+
+        return true;
     }
 
-    return true;
-}
+private:
+    const ExecutionSettings& m_settings;
+};
 
-double executeSimulation(phys3d::SimulationController& controller, const ExecutionParams& params) 
+/* ========== Simulation Runner ========== */
+
+class SimulationRunner
 {
-    if (params.verboseOutput) 
-    {
-        std::cout << "[INFO] Starting simulation for " << params.frameLimit
-                  << " frames..." << std::endl;
-    }
+    using Clock = std::chrono::high_resolution_clock;
+    using Duration = std::chrono::duration<double, std::milli>;
 
-    auto startMoment = TimeClock::now();
+public:
+    explicit SimulationRunner(const ExecutionSettings& settings)
+        : m_settings(settings) {}
 
-    for (int frameIdx = 0; frameIdx < params.frameLimit; ++frameIdx) 
+    bool initialize(phys3d::SimulationController& controller)
     {
-        if (params.writeFrames) 
+        controller.initialize();
+        controller.setBoundaryLimits(m_settings.domain.boundsMin, m_settings.domain.boundsMax);
+        controller.setIterationLimit(20);
+        controller.setConvergenceThreshold(1e-3f);
+
+        UniformGenerator::instance().resetSeed(42);
+
+        EntitySpawner spawner(m_settings);
+        
+        int idx = 0;
+        while (idx < m_settings.entityCount)
         {
-            std::string framePath = generateFramePath(params.outputFolder, frameIdx);
-            controller.exportFrame(framePath);
+            if (!spawner.spawnEntity(controller, idx))
+                return false;
+            ++idx;
         }
 
-        controller.tick();
-
-        if (params.verboseOutput) 
-        {
-            std::cout << "[INFO] Frame " << (frameIdx + 1) << "/" << params.frameLimit
-                      << " completed." << std::endl;
-        }
+        return true;
     }
 
-    auto endMoment = TimeClock::now();
-    TimeDelta elapsed = endMoment - startMoment;
-
-    if (params.verboseOutput) 
+    double execute(phys3d::SimulationController& controller)
     {
-        std::cout << "[INFO] Simulation finished." << std::endl;
-        if (params.writeFrames) 
+        if (m_settings.verboseOutput)
         {
-            std::cout << "[INFO] Output saved to " << params.outputFolder << "/" << std::endl;
+            std::cout << "[INFO] Starting simulation for " << m_settings.frameLimit
+                      << " frames..." << std::endl;
         }
+
+        const auto startTime = Clock::now();
+
+        int frameIdx = 0;
+        while (frameIdx < m_settings.frameLimit)
+        {
+            if (m_settings.writeFrames)
+            {
+                const std::string framePath = buildFramePath(m_settings.outputFolder, frameIdx);
+                controller.exportFrame(framePath);
+            }
+
+            controller.tick();
+
+            if (m_settings.verboseOutput)
+            {
+                std::cout << "[INFO] Frame " << (frameIdx + 1) << "/" << m_settings.frameLimit
+                          << " completed." << std::endl;
+            }
+
+            ++frameIdx;
+        }
+
+        const auto endTime = Clock::now();
+        const Duration elapsed = endTime - startTime;
+
+        if (m_settings.verboseOutput)
+        {
+            std::cout << "[INFO] Simulation finished." << std::endl;
+            if (m_settings.writeFrames)
+                std::cout << "[INFO] Output saved to " << m_settings.outputFolder << "/" << std::endl;
+        }
+
+        return elapsed.count();
     }
 
-    return elapsed.count();
+private:
+    const ExecutionSettings& m_settings;
+};
+
+/* ========== Application Entry Point ========== */
+
+int runApplication(int argc, char* argv[])
+{
+    using Clock = std::chrono::high_resolution_clock;
+    using Duration = std::chrono::duration<double, std::milli>;
+
+    // Parse command line
+    ExecutionSettings settings;
+    ArgumentProcessor parser(argc, argv);
+    
+    if (!parser.process(settings))
+        return 1;
+
+    // Prepare output directory
+    if (settings.writeFrames && !ensureDirectoryExists(settings.outputFolder))
+        return 1;
+
+    // Display startup info
+    if (!settings.performanceMode)
+    {
+        std::cout << "[INFO] Initializing rigid body simulation..." << std::endl
+                  << "[INFO] Mesh: " << settings.geometryFile << std::endl
+                  << "[INFO] Objects: " << settings.entityCount << std::endl
+                  << "[INFO] Frames: " << settings.frameLimit << std::endl;
+    }
+
+    // Create and configure simulation
+    phys3d::SimulationController controller;
+    SimulationRunner runner(settings);
+
+    const auto setupStart = Clock::now();
+    if (!runner.initialize(controller))
+        return 1;
+    const auto setupEnd = Clock::now();
+
+    TimingData timing;
+    timing.setupMs = Duration(setupEnd - setupStart).count();
+    timing.simulationMs = runner.execute(controller);
+
+    // Report results
+    if (settings.performanceMode)
+        ResultReporter::outputCSVLine(settings, timing);
+    else
+        ResultReporter::displayTimings(settings, timing);
+
+    return 0;
 }
 
 }  // namespace
 
-int main(int argc, char* argv[]) 
+int main(int argc, char* argv[])
 {
-    ExecutionParams params;
-
-    if (!processArguments(argc, argv, params)) 
-    {
-        return 1;
-    }
-
-    if (params.writeFrames && !prepareOutputFolder(params.outputFolder)) 
-    {
-        return 1;
-    }
-
-    if (!params.performanceMode) 
-    {
-        std::cout << "[INFO] Initializing rigid body simulation..." << std::endl;
-        std::cout << "[INFO] Mesh: " << params.geometryFile << std::endl;
-        std::cout << "[INFO] Objects: " << params.entityCount << std::endl;
-        std::cout << "[INFO] Frames: " << params.frameLimit << std::endl;
-    }
-
-    phys3d::SimulationController controller;
-
-    auto setupStartMoment = TimeClock::now();
-    if (!configureSimulation(controller, params)) 
-    {
-        return 1;
-    }
-    auto setupEndMoment = TimeClock::now();
-    TimeDelta setupDuration = setupEndMoment - setupStartMoment;
-
-    double simDurationMs = executeSimulation(controller, params);
-
-    PerformanceMetrics metrics;
-    metrics.geometryFile = params.geometryFile;
-    metrics.totalEntities = params.entityCount;
-    metrics.totalFrames = params.frameLimit;
-    metrics.setupDurationMs = setupDuration.count();
-    metrics.simulationDurationMs = simDurationMs;
-    metrics.totalDurationMs = metrics.setupDurationMs + metrics.simulationDurationMs;
-    metrics.averageFrameMs = simDurationMs / params.frameLimit;
-
-    if (params.performanceMode) 
-    {
-        outputCSV(metrics);
-    }
-    else 
-    {
-        displayMetrics(metrics);
-    }
-
-    return 0;
+    return runApplication(argc, argv);
 }
