@@ -3,6 +3,7 @@
  * @brief GPU-accelerated BVH construction using CUDA.
  */
 #pragma once
+#include "builtin_clz_msvc.h"
 
 #include <cuda_runtime.h>
 #include <vector>
