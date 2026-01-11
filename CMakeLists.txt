@@ -106,7 +106,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # ============================================================================
 
 target_compile_options(${PROJECT_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+    # Use UTF-8 source files on MSVC; GCC/Clang don't understand /utf-8
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcudafe=--diag_suppress=20014>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcudafe=--diag_suppress=20013>
