@@ -1,6 +1,5 @@
-/**
- * @file broadphase.cu
- * @brief CUDA implementation of GPU broadphase detection.
+/*
+ * Implementation: CUDA Broad Phase Detection
  */
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
@@ -12,226 +11,238 @@
 
 #include "broadphase.cuh"
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-// ============================================================================
-// CUDA Kernels
-// ============================================================================
+/* ========== Kernel Implementations ========== */
 
-__global__ void createEndpointsKernel(
-    const float* aabbMins,
-    const float* aabbMaxs,
-    AABBEndpoint* endpoints,
-    int n,
-    int axis)
+__global__ void kernelCreateEndpoints(
+    const float* boundsMinData,
+    const float* boundsMaxData,
+    BoundsEndpoint* endpoints,
+    int entityTotal,
+    int axisIdx)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= entityTotal) return;
 
-    endpoints[idx * 2].value = aabbMins[idx * 3 + axis];
-    endpoints[idx * 2].bodyId = idx;
-    endpoints[idx * 2].isMax = 0;
+    endpoints[tid * 2].coord = boundsMinData[tid * 3 + axisIdx];
+    endpoints[tid * 2].entityId = tid;
+    endpoints[tid * 2].isUpperBound = 0;
 
-    endpoints[idx * 2 + 1].value = aabbMaxs[idx * 3 + axis];
-    endpoints[idx * 2 + 1].bodyId = idx;
-    endpoints[idx * 2 + 1].isMax = 1;
+    endpoints[tid * 2 + 1].coord = boundsMaxData[tid * 3 + axisIdx];
+    endpoints[tid * 2 + 1].entityId = tid;
+    endpoints[tid * 2 + 1].isUpperBound = 1;
 }
 
-struct EndpointComparator {
-    __host__ __device__ bool operator()(const AABBEndpoint& a,
-                                        const AABBEndpoint& b) const {
-        if (a.value != b.value) return a.value < b.value;
-        return a.isMax < b.isMax;
+struct EndpointOrdering 
+{
+    __host__ __device__ bool operator()(const BoundsEndpoint& lhs, const BoundsEndpoint& rhs) const 
+    {
+        if (lhs.coord != rhs.coord) return lhs.coord < rhs.coord;
+        return lhs.isUpperBound < rhs.isUpperBound;
     }
 };
 
-__global__ void sweepPruneKernel(
-    const AABBEndpoint* sortedEndpoints,
-    const float* aabbMins,
-    const float* aabbMaxs,
-    int numEndpoints,
-    int numBodies,
-    CollisionPair* pairs,
-    int* pairCount,
-    int maxPairs)
+__global__ void kernelSweepAndPrune(
+    const BoundsEndpoint* sortedEndpoints,
+    const float* boundsMinData,
+    const float* boundsMaxData,
+    int endpointTotal,
+    int entityTotal,
+    EntityPair* pairResults,
+    int* pairCounter,
+    int maxPairLimit)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numEndpoints) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= endpointTotal) return;
 
-    AABBEndpoint ep = sortedEndpoints[idx];
-    if (ep.isMax) return;
+    BoundsEndpoint ep = sortedEndpoints[tid];
+    if (ep.isUpperBound) return;
 
-    int bodyA = ep.bodyId;
+    int entityA = ep.entityId;
     float minA[3], maxA[3];
-    for (int k = 0; k < 3; ++k) {
-        minA[k] = aabbMins[bodyA * 3 + k];
-        maxA[k] = aabbMaxs[bodyA * 3 + k];
+    for (int k = 0; k < 3; ++k) 
+    {
+        minA[k] = boundsMinData[entityA * 3 + k];
+        maxA[k] = boundsMaxData[entityA * 3 + k];
     }
 
-    for (int j = idx + 1; j < numEndpoints; ++j) {
-        AABBEndpoint other = sortedEndpoints[j];
+    for (int j = tid + 1; j < endpointTotal; ++j) 
+    {
+        BoundsEndpoint other = sortedEndpoints[j];
 
-        if (other.bodyId == bodyA && other.isMax) break;
-        if (other.isMax) continue;
-        if (other.bodyId == bodyA) continue;
+        if (other.entityId == entityA && other.isUpperBound) break;
+        if (other.isUpperBound) continue;
+        if (other.entityId == entityA) continue;
 
-        int bodyB = other.bodyId;
+        int entityB = other.entityId;
 
         float minB[3], maxB[3];
-        for (int k = 0; k < 3; ++k) {
-            minB[k] = aabbMins[bodyB * 3 + k];
-            maxB[k] = aabbMaxs[bodyB * 3 + k];
+        for (int k = 0; k < 3; ++k) 
+        {
+            minB[k] = boundsMinData[entityB * 3 + k];
+            maxB[k] = boundsMaxData[entityB * 3 + k];
         }
 
-        bool overlap = true;
-        for (int k = 0; k < 3; ++k) {
-            if (minA[k] > maxB[k] || maxA[k] < minB[k]) {
-                overlap = false;
+        bool overlapping = true;
+        for (int k = 0; k < 3; ++k) 
+        {
+            if (minA[k] > maxB[k] || maxA[k] < minB[k]) 
+            {
+                overlapping = false;
                 break;
             }
         }
 
-        if (overlap) {
-            int pairIdx = atomicAdd(pairCount, 1);
-            if (pairIdx < maxPairs) {
-                if (bodyA < bodyB) {
-                    pairs[pairIdx].bodyA = bodyA;
-                    pairs[pairIdx].bodyB = bodyB;
-                } else {
-                    pairs[pairIdx].bodyA = bodyB;
-                    pairs[pairIdx].bodyB = bodyA;
+        if (overlapping) 
+        {
+            int idx = atomicAdd(pairCounter, 1);
+            if (idx < maxPairLimit) 
+            {
+                if (entityA < entityB) 
+                {
+                    pairResults[idx].entityA = entityA;
+                    pairResults[idx].entityB = entityB;
+                } 
+                else 
+                {
+                    pairResults[idx].entityA = entityB;
+                    pairResults[idx].entityB = entityA;
                 }
             }
         }
     }
 }
 
-// ============================================================================
-// BroadphaseGPU Implementation
-// ============================================================================
+/* ========== BroadPhaseDetector Implementation ========== */
 
-BroadphaseGPU::BroadphaseGPU() {
-    cudaMalloc(&dPairCount_, sizeof(int));
+BroadPhaseDetector::BroadPhaseDetector() 
+{
+    cudaMalloc(&m_dPairCounter, sizeof(int));
 }
 
-BroadphaseGPU::~BroadphaseGPU() {
-    free();
+BroadPhaseDetector::~BroadPhaseDetector() 
+{
+    release();
 }
 
-void BroadphaseGPU::free() {
-    if (dEndpoints_) cudaFree(dEndpoints_);
-    if (dAabbMins_) cudaFree(dAabbMins_);
-    if (dAabbMaxs_) cudaFree(dAabbMaxs_);
-    if (dPairs_) cudaFree(dPairs_);
-    if (dPairCount_) cudaFree(dPairCount_);
+void BroadPhaseDetector::release() 
+{
+    if (m_dEndpoints) cudaFree(m_dEndpoints);
+    if (m_dBoundsMin) cudaFree(m_dBoundsMin);
+    if (m_dBoundsMax) cudaFree(m_dBoundsMax);
+    if (m_dPairs) cudaFree(m_dPairs);
+    if (m_dPairCounter) cudaFree(m_dPairCounter);
 
-    dEndpoints_ = nullptr;
-    dAabbMins_ = nullptr;
-    dAabbMaxs_ = nullptr;
-    dPairs_ = nullptr;
-    dPairCount_ = nullptr;
-    capacity_ = 0;
+    m_dEndpoints = nullptr;
+    m_dBoundsMin = nullptr;
+    m_dBoundsMax = nullptr;
+    m_dPairs = nullptr;
+    m_dPairCounter = nullptr;
+    m_bufferCapacity = 0;
 }
 
-void BroadphaseGPU::ensureCapacity(int numBodies) {
-    if (numBodies <= capacity_) return;
+void BroadPhaseDetector::ensureBufferCapacity(int entityCount) 
+{
+    if (entityCount <= m_bufferCapacity) return;
 
-    if (dEndpoints_) cudaFree(dEndpoints_);
-    if (dAabbMins_) cudaFree(dAabbMins_);
-    if (dAabbMaxs_) cudaFree(dAabbMaxs_);
-    if (dPairs_) cudaFree(dPairs_);
-    if (dPairCount_) cudaFree(dPairCount_);
+    if (m_dEndpoints) cudaFree(m_dEndpoints);
+    if (m_dBoundsMin) cudaFree(m_dBoundsMin);
+    if (m_dBoundsMax) cudaFree(m_dBoundsMax);
+    if (m_dPairs) cudaFree(m_dPairs);
+    if (m_dPairCounter) cudaFree(m_dPairCounter);
 
-    capacity_ = numBodies * 2;
-    maxPairs_ = (capacity_ * capacity_) / 4;
-    if (maxPairs_ > 1000000) maxPairs_ = 1000000;
+    m_bufferCapacity = entityCount * 2;
+    m_maxPairCount = (m_bufferCapacity * m_bufferCapacity) / 4;
+    if (m_maxPairCount > 1000000) m_maxPairCount = 1000000;
 
-    cudaMalloc(&dEndpoints_, capacity_ * 2 * sizeof(AABBEndpoint));
-    cudaMalloc(&dAabbMins_, capacity_ * 3 * sizeof(float));
-    cudaMalloc(&dAabbMaxs_, capacity_ * 3 * sizeof(float));
-    cudaMalloc(&dPairs_, maxPairs_ * sizeof(CollisionPair));
-    cudaMalloc(&dPairCount_, sizeof(int));
+    cudaMalloc(&m_dEndpoints, m_bufferCapacity * 2 * sizeof(BoundsEndpoint));
+    cudaMalloc(&m_dBoundsMin, m_bufferCapacity * 3 * sizeof(float));
+    cudaMalloc(&m_dBoundsMax, m_bufferCapacity * 3 * sizeof(float));
+    cudaMalloc(&m_dPairs, m_maxPairCount * sizeof(EntityPair));
+    cudaMalloc(&m_dPairCounter, sizeof(int));
 
-    cudaMemset(dPairCount_, 0, sizeof(int));
+    cudaMemset(m_dPairCounter, 0, sizeof(int));
 }
 
-void BroadphaseGPU::detectPairs(const Vector<Vec3>& aabbMins,
-                                 const Vector<Vec3>& aabbMaxs,
-                                 Vector<CollisionPair>& outPairs) {
-    int n = static_cast<int>(aabbMins.size());
-    if (n < 2) {
-        outPairs.clear();
+void BroadPhaseDetector::findCandidatePairs(const DynArray<Point3>& boundsMin,
+                                             const DynArray<Point3>& boundsMax,
+                                             DynArray<EntityPair>& resultPairs) 
+{
+    int entityCount = static_cast<int>(boundsMin.size());
+    if (entityCount < 2) 
+    {
+        resultPairs.clear();
         return;
     }
 
-    ensureCapacity(n);
+    ensureBufferCapacity(entityCount);
 
-    // Copy AABBs to GPU
-    Vector<float> hMins(n * 3), hMaxs(n * 3);
-    for (int i = 0; i < n; ++i) {
-        hMins[i * 3 + 0] = aabbMins[i].x();
-        hMins[i * 3 + 1] = aabbMins[i].y();
-        hMins[i * 3 + 2] = aabbMins[i].z();
-        hMaxs[i * 3 + 0] = aabbMaxs[i].x();
-        hMaxs[i * 3 + 1] = aabbMaxs[i].y();
-        hMaxs[i * 3 + 2] = aabbMaxs[i].z();
+    DynArray<float> hostMin(entityCount * 3), hostMax(entityCount * 3);
+    for (int i = 0; i < entityCount; ++i) 
+    {
+        hostMin[i * 3 + 0] = boundsMin[i].x();
+        hostMin[i * 3 + 1] = boundsMin[i].y();
+        hostMin[i * 3 + 2] = boundsMin[i].z();
+        hostMax[i * 3 + 0] = boundsMax[i].x();
+        hostMax[i * 3 + 1] = boundsMax[i].y();
+        hostMax[i * 3 + 2] = boundsMax[i].z();
     }
-    cudaMemcpy(dAabbMins_, hMins.data(), n * 3 * sizeof(float),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(dAabbMaxs_, hMaxs.data(), n * 3 * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(m_dBoundsMin, hostMin.data(), entityCount * 3 * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(m_dBoundsMax, hostMax.data(), entityCount * 3 * sizeof(float), cudaMemcpyHostToDevice);
 
-    int axis = 0;  // Use X axis
-    int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
+    int primaryAxis = 0;
+    int threadsPerBlock = 256;
+    int numBlocks = (entityCount + threadsPerBlock - 1) / threadsPerBlock;
 
-    createEndpointsKernel<<<numBlocks, blockSize>>>(
-        dAabbMins_, dAabbMaxs_, dEndpoints_, n, axis);
+    kernelCreateEndpoints<<<numBlocks, threadsPerBlock>>>(
+        m_dBoundsMin, m_dBoundsMax, m_dEndpoints, entityCount, primaryAxis);
 
-    try {
-        thrust::sort(thrust::device, dEndpoints_, dEndpoints_ + n * 2,
-                     EndpointComparator());
-    } catch (thrust::system_error& e) {
-        printf("[FATAL] Thrust sort failed: %s\n", e.what());
-        outPairs.clear();
+    try 
+    {
+        thrust::sort(thrust::device, m_dEndpoints, m_dEndpoints + entityCount * 2, EndpointOrdering());
+    } 
+    catch (thrust::system_error& e) 
+    {
+        printf("[ERROR] Thrust sort failed: %s\n", e.what());
+        resultPairs.clear();
         return;
     }
 
     int zero = 0;
-    cudaMemcpy(dPairCount_, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(m_dPairCounter, &zero, sizeof(int), cudaMemcpyHostToDevice);
 
-    int numEndpoints = n * 2;
-    numBlocks = (numEndpoints + blockSize - 1) / blockSize;
+    int endpointTotal = entityCount * 2;
+    numBlocks = (endpointTotal + threadsPerBlock - 1) / threadsPerBlock;
 
-    sweepPruneKernel<<<numBlocks, blockSize>>>(
-        dEndpoints_, dAabbMins_, dAabbMaxs_, numEndpoints, n,
-        dPairs_, dPairCount_, maxPairs_);
+    kernelSweepAndPrune<<<numBlocks, threadsPerBlock>>>(
+        m_dEndpoints, m_dBoundsMin, m_dBoundsMax, endpointTotal, entityCount,
+        m_dPairs, m_dPairCounter, m_maxPairCount);
 
     cudaDeviceSynchronize();
 
     int pairCount;
-    cudaMemcpy(&pairCount, dPairCount_, sizeof(int), cudaMemcpyDeviceToHost);
-    pairCount = std::min(pairCount, maxPairs_);
+    cudaMemcpy(&pairCount, m_dPairCounter, sizeof(int), cudaMemcpyDeviceToHost);
+    pairCount = std::min(pairCount, m_maxPairCount);
 
-    outPairs.resize(pairCount);
-    if (pairCount > 0) {
-        cudaMemcpy(outPairs.data(), dPairs_, pairCount * sizeof(CollisionPair),
-                   cudaMemcpyDeviceToHost);
+    resultPairs.resize(pairCount);
+    if (pairCount > 0) 
+    {
+        cudaMemcpy(resultPairs.data(), m_dPairs, pairCount * sizeof(EntityPair), cudaMemcpyDeviceToHost);
     }
 
-    // Remove duplicates
-    std::sort(outPairs.begin(), outPairs.end(),
-              [](const CollisionPair& a, const CollisionPair& b) {
-                  if (a.bodyA != b.bodyA) return a.bodyA < b.bodyA;
-                  return a.bodyB < b.bodyB;
+    std::sort(resultPairs.begin(), resultPairs.end(),
+              [](const EntityPair& a, const EntityPair& b) {
+                  if (a.entityA != b.entityA) return a.entityA < b.entityA;
+                  return a.entityB < b.entityB;
               });
-    auto last = std::unique(outPairs.begin(), outPairs.end(),
-                            [](const CollisionPair& a, const CollisionPair& b) {
-                                return a.bodyA == b.bodyA && a.bodyB == b.bodyB;
+    auto lastUnique = std::unique(resultPairs.begin(), resultPairs.end(),
+                            [](const EntityPair& a, const EntityPair& b) {
+                                return a.entityA == b.entityA && a.entityB == b.entityB;
                             });
-    outPairs.erase(last, outPairs.end());
+    resultPairs.erase(lastUnique, resultPairs.end());
 }
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d

@@ -1,104 +1,124 @@
-/**
- * @file rigid_body.cpp
- * @brief Implementation of the RigidBody class.
+/*
+ * Implementation: DynamicEntity class
  */
 #include "rigid_body.h"
 #include "core/mesh_cache.h"
 
-namespace rigid {
+namespace phys3d {
 
-RigidBody::RigidBody(String name) : name_(std::move(name)) {}
+DynamicEntity::DynamicEntity(TextType identifier) 
+    : m_identifier(std::move(identifier)) 
+{}
 
-bool RigidBody::loadMesh(const String& path, bool buildBVH) {
-    auto meshPtr = MeshCache::instance().acquire(path, buildBVH);
-    if (!meshPtr) {
+bool DynamicEntity::attachSurface(const TextType& resourcePath, bool buildTree) 
+{
+    auto surfacePtr = SurfaceResourcePool::global().fetch(resourcePath, buildTree);
+    if (!surfacePtr) 
+    {
         return false;
     }
 
-    mesh_ = std::move(meshPtr);
-    boundsDirty_ = true;
-    inertiaDirty_ = true;
+    m_geometry = std::move(surfacePtr);
+    m_extentStale = true;
+    m_inertiaStale = true;
     return true;
 }
 
-void RigidBody::setMesh(SharedPtr<Mesh> mesh) {
-    mesh_ = std::move(mesh);
-    boundsDirty_ = true;
-    inertiaDirty_ = true;
+void DynamicEntity::assignSurface(JointPtr<TriangleSurface> surface) 
+{
+    m_geometry = std::move(surface);
+    m_extentStale = true;
+    m_inertiaStale = true;
 }
 
-void RigidBody::setProperties(const BodyProperties& props) {
-    properties_ = props;
-    inertiaDirty_ = true;
+void DynamicEntity::assignMaterial(const MaterialProperties& props) 
+{
+    m_material = props;
+    m_inertiaStale = true;
 }
 
-void RigidBody::setState(const BodyState& newState) {
-    state_ = newState;
-    boundsDirty_ = true;
-    inertiaDirty_ = true;
+void DynamicEntity::assignKinematic(const EntityState& state) 
+{
+    m_kinematic = state;
+    m_extentStale = true;
+    m_inertiaStale = true;
 }
 
-void RigidBody::applyForce(const Vec3& force, const Vec3& worldPoint) {
-    forceAccum_ += force;
-    Vec3 r = worldPoint - state_.position;
-    torqueAccum_ += r.cross(force);
+void DynamicEntity::accumulateForce(const Point3& force, const Point3& worldPoint) 
+{
+    m_forceSum += force;
+    Point3 lever = worldPoint - m_kinematic.translation;
+    m_torqueSum += lever.cross(force);
 }
 
-void RigidBody::applyTorque(const Vec3& torque) {
-    torqueAccum_ += torque;
+void DynamicEntity::accumulateTorque(const Point3& torque) 
+{
+    m_torqueSum += torque;
 }
 
-void RigidBody::clearAccumulators() {
-    forceAccum_.setZero();
-    torqueAccum_.setZero();
+void DynamicEntity::resetAccumulators() 
+{
+    m_forceSum.setZero();
+    m_torqueSum.setZero();
 }
 
-const Mat3& RigidBody::worldInertiaInv() {
-    if (inertiaDirty_) {
-        syncWorldInertia();
+const Matrix33& DynamicEntity::worldInertiaInverse() 
+{
+    if (m_inertiaStale) 
+    {
+        refreshWorldInertia();
     }
-    return worldInertiaInv_;
+    return m_worldInertiaInv;
 }
 
-AABB& RigidBody::worldBounds() {
-    if (boundsDirty_) {
-        updateWorldBounds();
+BoundingBox3D& DynamicEntity::worldExtent() 
+{
+    if (m_extentStale) 
+    {
+        recomputeWorldExtent();
     }
-    return worldBounds_;
+    return m_worldExtent;
 }
 
-void RigidBody::updateWorldBounds() {
-    worldBounds_.reset();
+void DynamicEntity::recomputeWorldExtent() 
+{
+    m_worldExtent.invalidate();
 
-    if (!mesh_) {
-        boundsDirty_ = false;
+    if (!m_geometry) 
+    {
+        m_extentStale = false;
         return;
     }
 
-    const auto& verts = mesh_->vertices();
-    if (verts.empty()) {
-        boundsDirty_ = false;
+    const auto& pointCloud = m_geometry->pointCloud();
+    if (pointCloud.empty()) 
+    {
+        m_extentStale = false;
         return;
     }
 
-    Mat3 rot = state_.rotationMatrix();
-    Float scale = state_.scale;
-    for (const Vec3& vLocal : verts) {
-        Vec3 vScaled = (vLocal - properties_.centerOfMass) * scale;
-        Vec3 vWorld = rot * vScaled + state_.position;
-        worldBounds_.expand(vWorld);
+    Matrix33 rotMat = m_kinematic.orientationMatrix();
+    RealType scaleFactor = m_kinematic.scaleFactor;
+    
+    for (const Point3& localPt : pointCloud) 
+    {
+        Point3 scaledPt = (localPt - m_material.massCentroid) * scaleFactor;
+        Point3 worldPt = rotMat * scaledPt + m_kinematic.translation;
+        m_worldExtent.enclose(worldPt);
     }
 
-    boundsDirty_ = false;
+    m_extentStale = false;
 }
 
-void RigidBody::syncWorldInertia() {
-    Mat3 rot = state_.rotationMatrix();
-    // Inertia scales as scale^2 (I = m * r^2, r scales with scale)
-    Float scaleSquared = state_.scale * state_.scale;
-    Float invScaleSquared = (scaleSquared > 0.0f) ? (1.0f / scaleSquared) : 1.0f;
-    worldInertiaInv_ = rot * (properties_.inertiaBodyInv * invScaleSquared) * rot.transpose();
-    inertiaDirty_ = false;
+void DynamicEntity::refreshWorldInertia() 
+{
+    Matrix33 rotMat = m_kinematic.orientationMatrix();
+    RealType scaleSq = m_kinematic.scaleFactor * m_kinematic.scaleFactor;
+    RealType invScaleSq = (scaleSq > static_cast<RealType>(0)) ? 
+                          (static_cast<RealType>(1) / scaleSq) : 
+                          static_cast<RealType>(1);
+    m_worldInertiaInv = rotMat * (m_material.localInertiaInv * invScaleSq) * rotMat.transpose();
+    m_inertiaStale = false;
 }
 
-}  // namespace rigid
+}  // namespace phys3d

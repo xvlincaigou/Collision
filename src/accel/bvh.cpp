@@ -1,6 +1,5 @@
-/**
- * @file bvh.cpp
- * @brief Implementation of the BVH class.
+/*
+ * Implementation: SpatialTree class
  */
 #include "bvh.h"
 
@@ -10,176 +9,180 @@
 #include "gpu/bvh_builder.cuh"
 #endif
 
-namespace rigid {
+namespace phys3d {
 
-BVH::BVH() = default;
-BVH::~BVH() = default;
+SpatialTree::SpatialTree() = default;
+SpatialTree::~SpatialTree() = default;
 
-BVH::BVH(BVH&&) noexcept = default;
-BVH& BVH::operator=(BVH&&) noexcept = default;
+SpatialTree::SpatialTree(SpatialTree&&) noexcept = default;
+SpatialTree& SpatialTree::operator=(SpatialTree&&) noexcept = default;
 
-void BVH::clear() {
-    nodes_.clear();
-    primIndices_.clear();
-    prims_.clear();
-    rootIndex_ = -1;
-    gpuBuilder_.reset();
+void SpatialTree::demolish() 
+{
+    m_nodeStorage.clear();
+    m_faceOrder.clear();
+    m_primitives.clear();
+    m_rootIdx = -1;
+    m_deviceBuilder.reset();
 }
 
-void BVH::build(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles) {
-    clear();
+void SpatialTree::construct(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces) 
+{
+    demolish();
 
-    if (triangles.empty()) {
+    if (faces.empty()) 
+    {
         return;
     }
 
-    const Int primCount = static_cast<Int>(triangles.size());
-    prims_.resize(primCount);
-    primIndices_.resize(primCount);
-    std::iota(primIndices_.begin(), primIndices_.end(), 0);
+    const IntType faceTotal = static_cast<IntType>(faces.size());
+    m_primitives.resize(faceTotal);
+    m_faceOrder.resize(faceTotal);
+    std::iota(m_faceOrder.begin(), m_faceOrder.end(), 0);
 
-    // Compute primitive bounds and centroids
-    for (Int i = 0; i < primCount; ++i) {
-        const auto& tri = triangles[i];
-        const Vec3& v0 = vertices[tri.x()];
-        const Vec3& v1 = vertices[tri.y()];
-        const Vec3& v2 = vertices[tri.z()];
+    for (IntType idx = 0; idx < faceTotal; ++idx) 
+    {
+        const auto& face = faces[idx];
+        const Point3& p0 = pointCloud[face.x()];
+        const Point3& p1 = pointCloud[face.y()];
+        const Point3& p2 = pointCloud[face.z()];
 
-        PrimRecord& rec = prims_[i];
-        rec.bounds.reset();
-        rec.bounds.expand(v0);
-        rec.bounds.expand(v1);
-        rec.bounds.expand(v2);
-        rec.centroid = (v0 + v1 + v2) / 3.0f;
-        rec.triangleIndex = i;
+        PrimitiveInfo& info = m_primitives[idx];
+        info.extent.invalidate();
+        info.extent.enclose(p0);
+        info.extent.enclose(p1);
+        info.extent.enclose(p2);
+        info.center = (p0 + p1 + p2) / static_cast<RealType>(3);
+        info.faceIdx = idx;
     }
 
-    // Reserve space for nodes (at most 2n-1 nodes for n primitives)
-    nodes_.reserve(primCount * 2);
-
-    // Build tree recursively
-    rootIndex_ = buildNode(0, primCount, 0);
+    m_nodeStorage.reserve(faceTotal * 2);
+    m_rootIdx = recursiveBuild(0, faceTotal, 0);
 }
 
-Int BVH::buildNode(Int first, Int last, Int depth) {
-    Int nodeIndex = static_cast<Int>(nodes_.size());
-    nodes_.emplace_back();
-    BVHNode& node = nodes_.back();
+IntType SpatialTree::recursiveBuild(IntType rangeStart, IntType rangeEnd, IntType level) 
+{
+    IntType newNodeIdx = static_cast<IntType>(m_nodeStorage.size());
+    m_nodeStorage.emplace_back();
+    TreeNode& currentNode = m_nodeStorage.back();
 
-    node.bounds = accumulateBounds(first, last);
-    node.firstPrim = first;
-    node.primCount = last - first;
-    node.left = -1;
-    node.right = -1;
+    currentNode.volume = computeRangeBounds(rangeStart, rangeEnd);
+    currentNode.leafStart = rangeStart;
+    currentNode.leafCount = rangeEnd - rangeStart;
+    currentNode.childLeft = -1;
+    currentNode.childRight = -1;
 
-    // Check if should create leaf
-    const bool forceLeaf = (node.primCount <= maxPrimsPerLeaf_) || (depth >= maxDepth_);
-    if (forceLeaf) {
-        return nodeIndex;
+    bool shouldTerminate = (currentNode.leafCount <= m_maxLeafSize) || (level >= m_maxTreeDepth);
+    if (shouldTerminate) 
+    {
+        return newNodeIdx;
     }
 
-    // Find split axis (largest centroid extent)
-    Vec3 centroidMin, centroidMax;
-    computeCentroidBounds(first, last, centroidMin, centroidMax);
-    Vec3 centroidExtent = centroidMax - centroidMin;
+    Point3 centerMin, centerMax;
+    computeCenterBounds(rangeStart, rangeEnd, centerMin, centerMax);
+    Point3 centerSpan = centerMax - centerMin;
 
-    Int axis = 0;
-    if (centroidExtent.y() > centroidExtent.x()) axis = 1;
-    if (centroidExtent.z() > centroidExtent[axis]) axis = 2;
+    IntType splitAxis = 0;
+    if (centerSpan.y() > centerSpan.x()) splitAxis = 1;
+    if (centerSpan.z() > centerSpan[splitAxis]) splitAxis = 2;
 
-    // Check if centroids are too close
-    if (centroidExtent[axis] <= centroidEps_) {
-        return nodeIndex;
+    if (centerSpan[splitAxis] <= m_centerEpsilon) 
+    {
+        return newNodeIdx;
     }
 
-    // Split at midpoint
-    Float splitValue = centroidMin[axis] + centroidExtent[axis] * 0.5f;
-    Int mid = partitionPrimitives(first, last, axis, splitValue);
+    RealType splitVal = centerMin[splitAxis] + centerSpan[splitAxis] * static_cast<RealType>(0.5);
+    IntType midPoint = partitionRange(rangeStart, rangeEnd, splitAxis, splitVal);
 
-    // Check if partition failed
-    if (mid == first || mid == last) {
-        return nodeIndex;
+    if (midPoint == rangeStart || midPoint == rangeEnd) 
+    {
+        return newNodeIdx;
     }
 
-    // Create internal node
-    node.firstPrim = -1;
-    node.primCount = 0;
-    node.left = buildNode(first, mid, depth + 1);
-    node.right = buildNode(mid, last, depth + 1);
+    currentNode.leafStart = -1;
+    currentNode.leafCount = 0;
+    currentNode.childLeft = recursiveBuild(rangeStart, midPoint, level + 1);
+    currentNode.childRight = recursiveBuild(midPoint, rangeEnd, level + 1);
 
-    return nodeIndex;
+    return newNodeIdx;
 }
 
-AABB BVH::accumulateBounds(Int first, Int last) const {
-    AABB result;
-    for (Int i = first; i < last; ++i) {
-        const AABB& primBounds = prims_[primIndices_[i]].bounds;
-        result.merge(primBounds);
+BoundingBox3D SpatialTree::computeRangeBounds(IntType rangeStart, IntType rangeEnd) const 
+{
+    BoundingBox3D result;
+    for (IntType idx = rangeStart; idx < rangeEnd; ++idx) 
+    {
+        const BoundingBox3D& primBounds = m_primitives[m_faceOrder[idx]].extent;
+        result.unite(primBounds);
     }
     return result;
 }
 
-void BVH::computeCentroidBounds(Int first, Int last, Vec3& minOut, Vec3& maxOut) const {
-    minOut = positiveInfinity();
-    maxOut = negativeInfinity();
+void SpatialTree::computeCenterBounds(IntType rangeStart, IntType rangeEnd, Point3& minC, Point3& maxC) const 
+{
+    minC = makeInfinityVec();
+    maxC = makeNegInfinityVec();
 
-    for (Int i = first; i < last; ++i) {
-        const Vec3& centroid = prims_[primIndices_[i]].centroid;
-        minOut = minOut.cwiseMin(centroid);
-        maxOut = maxOut.cwiseMax(centroid);
+    for (IntType idx = rangeStart; idx < rangeEnd; ++idx) 
+    {
+        const Point3& c = m_primitives[m_faceOrder[idx]].center;
+        minC = minC.cwiseMin(c);
+        maxC = maxC.cwiseMax(c);
     }
 }
 
-Int BVH::partitionPrimitives(Int first, Int last, Int axis, Float splitValue) {
-    auto beginIt = primIndices_.begin() + first;
-    auto endIt = primIndices_.begin() + last;
+IntType SpatialTree::partitionRange(IntType rangeStart, IntType rangeEnd, IntType axis, RealType splitPos) 
+{
+    auto startIter = m_faceOrder.begin() + rangeStart;
+    auto endIter = m_faceOrder.begin() + rangeEnd;
 
-    auto predicate = [&](Int primIndex) {
-        return prims_[primIndex].centroid[axis] < splitValue;
+    auto comparator = [&](IntType faceIdx) {
+        return m_primitives[faceIdx].center[axis] < splitPos;
     };
 
-    auto midIt = std::partition(beginIt, endIt, predicate);
-    return static_cast<Int>(midIt - primIndices_.begin());
+    auto midIter = std::partition(startIter, endIter, comparator);
+    return static_cast<IntType>(midIter - m_faceOrder.begin());
 }
 
 #if defined(RIGID_USE_CUDA)
 
-void BVH::buildGPU(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles) {
-    clear();
+void SpatialTree::constructOnDevice(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces) 
+{
+    demolish();
 
-    if (triangles.empty()) {
+    if (faces.empty()) 
+    {
         return;
     }
 
-    gpuBuilder_ = std::make_unique<gpu::BVHBuilderGPU>();
-    gpuBuilder_->build(vertices, triangles);
+    m_deviceBuilder = std::make_unique<gpu::DeviceTreeBuilder>();
+    m_deviceBuilder->execute(pointCloud, faces);
 
-    // Copy results back to host
-    Vector<gpu::BVHNodeDevice> gpuNodes;
-    gpuBuilder_->copyToHost(gpuNodes, primIndices_);
+    DynArray<gpu::DeviceTreeNode> deviceNodes;
+    m_deviceBuilder->transferToHost(deviceNodes, m_faceOrder);
 
-    // Convert GPU nodes to CPU format
-    nodes_.resize(gpuNodes.size());
-    for (size_t i = 0; i < gpuNodes.size(); ++i) {
-        const auto& gn = gpuNodes[i];
-        nodes_[i].bounds.min_pt = Vec3(gn.bounds.min.x, gn.bounds.min.y, gn.bounds.min.z);
-        nodes_[i].bounds.max_pt = Vec3(gn.bounds.max.x, gn.bounds.max.y, gn.bounds.max.z);
-        nodes_[i].left = gn.left;
-        nodes_[i].right = gn.right;
-        nodes_[i].firstPrim = gn.firstPrim;
-        nodes_[i].primCount = gn.primCount;
+    m_nodeStorage.resize(deviceNodes.size());
+    for (size_t k = 0; k < deviceNodes.size(); ++k) 
+    {
+        const auto& dn = deviceNodes[k];
+        m_nodeStorage[k].volume.corner_lo = Point3(dn.volume.lo.x, dn.volume.lo.y, dn.volume.lo.z);
+        m_nodeStorage[k].volume.corner_hi = Point3(dn.volume.hi.x, dn.volume.hi.y, dn.volume.hi.z);
+        m_nodeStorage[k].childLeft = dn.leftChild;
+        m_nodeStorage[k].childRight = dn.rightChild;
+        m_nodeStorage[k].leafStart = dn.leafStart;
+        m_nodeStorage[k].leafCount = dn.leafCount;
     }
 
-    rootIndex_ = 0;
+    m_rootIdx = 0;
 }
 
 #else
 
-void BVH::buildGPU(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles) {
-    // Fallback to CPU build
-    build(vertices, triangles);
+void SpatialTree::constructOnDevice(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces) 
+{
+    construct(pointCloud, faces);
 }
 
 #endif
 
-}  // namespace rigid
+}  // namespace phys3d

@@ -1,107 +1,94 @@
-/**
- * @file bvh.h
- * @brief Bounding Volume Hierarchy for efficient collision detection.
+/*
+ * Hierarchical Bounding Volume Acceleration Structure
  */
-#pragma once
+#ifndef PHYS3D_SPATIAL_TREE_HPP
+#define PHYS3D_SPATIAL_TREE_HPP
 
 #include "core/common.h"
 
 #include <algorithm>
 #include <cstdint>
 
-namespace rigid {
+namespace phys3d {
 
-// Forward declaration
-namespace gpu {
-class BVHBuilderGPU;
-}
+namespace gpu { class DeviceTreeBuilder; }
 
-/**
- * @struct BVHNode
- * @brief A node in the BVH tree.
+/*
+ * TreeNode - Single node in the spatial hierarchy
  */
-struct BVHNode {
-    AABB bounds;
-    Int left       = -1;  ///< Left child index (-1 if none)
-    Int right      = -1;  ///< Right child index (-1 if none)
-    Int firstPrim  = -1;  ///< First primitive index (for leaves)
-    Int primCount  = 0;   ///< Number of primitives (>0 means leaf)
+struct TreeNode 
+{
+    BoundingBox3D volume;
+    IntType childLeft   = -1;
+    IntType childRight  = -1;
+    IntType leafStart   = -1;
+    IntType leafCount   = 0;
 
-    [[nodiscard]] bool isLeaf() const { return primCount > 0; }
+    [[nodiscard]] bool isTerminal() const { return leafCount > 0; }
 };
 
-/**
- * @class BVH
- * @brief Bounding Volume Hierarchy for triangle meshes.
- *
- * Supports both CPU and GPU construction/traversal.
+/*
+ * SpatialTree - Binary tree of bounding volumes for mesh triangles
  */
-class BVH {
+class SpatialTree 
+{
 public:
-    BVH();
-    ~BVH();
+    SpatialTree();
+    ~SpatialTree();
 
-    // Non-copyable but movable
-    BVH(const BVH&) = delete;
-    BVH& operator=(const BVH&) = delete;
-    BVH(BVH&&) noexcept;
-    BVH& operator=(BVH&&) noexcept;
+    SpatialTree(const SpatialTree&) = delete;
+    SpatialTree& operator=(const SpatialTree&) = delete;
+    SpatialTree(SpatialTree&&) noexcept;
+    SpatialTree& operator=(SpatialTree&&) noexcept;
 
-    // ========================================================================
-    // Construction
-    // ========================================================================
+    /* Construction */
+    void construct(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces);
+    void constructOnDevice(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces);
+    void demolish();
 
-    /// Build BVH on CPU
-    void build(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles);
+    /* Queries */
+    [[nodiscard]] bool constructed() const { return m_rootIdx >= 0; }
+    [[nodiscard]] IntType rootIdx() const { return m_rootIdx; }
+    [[nodiscard]] IntType nodeTotal() const { return static_cast<IntType>(m_nodeStorage.size()); }
 
-    /// Build BVH on GPU (falls back to CPU if CUDA not available)
-    void buildGPU(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles);
+    [[nodiscard]] const TreeNode& nodeAt(IntType idx) const { return m_nodeStorage[idx]; }
+    [[nodiscard]] const DynArray<TreeNode>& allNodes() const { return m_nodeStorage; }
+    [[nodiscard]] const DynArray<IntType>& faceOrdering() const { return m_faceOrder; }
 
-    /// Clear all BVH data
-    void clear();
-
-    // ========================================================================
-    // Accessors
-    // ========================================================================
-
-    [[nodiscard]] bool isBuilt() const { return rootIndex_ >= 0; }
-    [[nodiscard]] Int rootIndex() const { return rootIndex_; }
-    [[nodiscard]] Int nodeCount() const { return static_cast<Int>(nodes_.size()); }
-
-    [[nodiscard]] const BVHNode& node(Int index) const { return nodes_[index]; }
-    [[nodiscard]] const Vector<BVHNode>& nodes() const { return nodes_; }
-    [[nodiscard]] const Vector<Int>& primitiveIndices() const { return primIndices_; }
-
-    // ========================================================================
-    // GPU Support
-    // ========================================================================
-
-    [[nodiscard]] bool hasGPUData() const { return gpuBuilder_ != nullptr; }
-    [[nodiscard]] gpu::BVHBuilderGPU* gpuBuilder() const { return gpuBuilder_.get(); }
+    /* Device Data */
+    [[nodiscard]] bool hasDeviceData() const { return m_deviceBuilder != nullptr; }
+    [[nodiscard]] gpu::DeviceTreeBuilder* deviceBuilder() const { return m_deviceBuilder.get(); }
 
 private:
-    /// Primitive record for BVH construction
-    struct PrimRecord {
-        AABB bounds;
-        Vec3 centroid;
-        Int triangleIndex = -1;
+    struct PrimitiveInfo 
+    {
+        BoundingBox3D extent;
+        Point3 center;
+        IntType faceIdx = -1;
     };
 
-    Int buildNode(Int first, Int last, Int depth);
-    AABB accumulateBounds(Int first, Int last) const;
-    void computeCentroidBounds(Int first, Int last, Vec3& minOut, Vec3& maxOut) const;
-    Int partitionPrimitives(Int first, Int last, Int axis, Float splitValue);
+    IntType recursiveBuild(IntType rangeStart, IntType rangeEnd, IntType level);
+    BoundingBox3D computeRangeBounds(IntType rangeStart, IntType rangeEnd) const;
+    void computeCenterBounds(IntType rangeStart, IntType rangeEnd, Point3& minC, Point3& maxC) const;
+    IntType partitionRange(IntType rangeStart, IntType rangeEnd, IntType axis, RealType splitPos);
 
-    Vector<BVHNode> nodes_;
-    Vector<Int> primIndices_;
-    Vector<PrimRecord> prims_;
+    DynArray<TreeNode> m_nodeStorage;
+    DynArray<IntType> m_faceOrder;
+    DynArray<PrimitiveInfo> m_primitives;
 
-    Int rootIndex_       = -1;
-    Int maxPrimsPerLeaf_ = 4;
-    Int maxDepth_        = 64;
-    Float centroidEps_   = 1e-4f;
+    IntType m_rootIdx         = -1;
+    IntType m_maxLeafSize     = 4;
+    IntType m_maxTreeDepth    = 64;
+    RealType m_centerEpsilon  = static_cast<RealType>(1e-4);
 
-    UniquePtr<gpu::BVHBuilderGPU> gpuBuilder_;
+    SolePtr<gpu::DeviceTreeBuilder> m_deviceBuilder;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using BVHNode = phys3d::TreeNode;
+    using BVH = phys3d::SpatialTree;
+}
+
+#endif // PHYS3D_SPATIAL_TREE_HPP

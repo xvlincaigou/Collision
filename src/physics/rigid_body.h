@@ -1,128 +1,116 @@
-/**
- * @file rigid_body.h
- * @brief Rigid body representation with state and properties.
+/*
+ * Dynamic Entity with Geometry and Physical State
  */
-#pragma once
+#ifndef PHYS3D_DYNAMIC_ENTITY_HPP
+#define PHYS3D_DYNAMIC_ENTITY_HPP
 
 #include "body_properties.h"
 #include "core/common.h"
 #include "core/mesh.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @struct BodyState
- * @brief Dynamic state of a rigid body (position, velocity, orientation, scale).
+/*
+ * EntityState - Kinematic state of a dynamic entity
  */
-struct BodyState {
-    Vec3 position    = Vec3::Zero();
-    Quat orientation = Quat::Identity();
-    Vec3 linearVel   = Vec3::Zero();
-    Vec3 angularVel  = Vec3::Zero();
-    Float scale      = 1.0f;  ///< Uniform scale factor (affects radius)
+struct EntityState 
+{
+    Point3    translation  = Point3::Zero();
+    Rotation4 orientation  = Rotation4::Identity();
+    Point3    velocity     = Point3::Zero();
+    Point3    angularRate  = Point3::Zero();
+    RealType  scaleFactor  = static_cast<RealType>(1);
 
-    /// Get the rotation matrix from orientation
-    [[nodiscard]] Mat3 rotationMatrix() const {
+    [[nodiscard]] Matrix33 orientationMatrix() const 
+    {
         return orientation.toRotationMatrix();
     }
 
-    /// Transform a local point to world space (applies scale)
-    [[nodiscard]] Vec3 localToWorld(const Vec3& localPt) const {
-        return orientation * (localPt * scale) + position;
+    [[nodiscard]] Point3 transformToWorld(const Point3& localPt) const 
+    {
+        return orientation * (localPt * scaleFactor) + translation;
     }
 
-    /// Transform a world point to local space (applies inverse scale)
-    [[nodiscard]] Vec3 worldToLocal(const Vec3& worldPt) const {
-        Vec3 local = orientation.inverse() * (worldPt - position);
-        return (scale > 0.0f) ? local / scale : local;
+    [[nodiscard]] Point3 transformToLocal(const Point3& worldPt) const 
+    {
+        Point3 local = orientation.inverse() * (worldPt - translation);
+        return (scaleFactor > static_cast<RealType>(0)) ? local / scaleFactor : local;
     }
 
-    /// Get local point scaled but not transformed
-    [[nodiscard]] Vec3 scalePoint(const Vec3& localPt) const {
-        return localPt * scale;
+    [[nodiscard]] Point3 applyScale(const Point3& localPt) const 
+    {
+        return localPt * scaleFactor;
     }
 };
 
-/**
- * @class RigidBody
- * @brief A rigid body with geometry, physical properties, and state.
+/*
+ * DynamicEntity - A physical object in the simulation
  */
-class RigidBody {
+class DynamicEntity 
+{
 public:
-    RigidBody() = default;
-    explicit RigidBody(String name);
+    DynamicEntity() = default;
+    explicit DynamicEntity(TextType identifier);
 
-    // ========================================================================
-    // Mesh Management
-    // ========================================================================
+    /* Geometry */
+    bool attachSurface(const TextType& resourcePath, bool buildTree = true);
+    void assignSurface(JointPtr<TriangleSurface> surface);
 
-    bool loadMesh(const String& path, bool buildBVH = true);
-    void setMesh(SharedPtr<Mesh> mesh);
+    [[nodiscard]] bool hasSurface() const { return m_geometry != nullptr; }
+    [[nodiscard]] TriangleSurface& surface() { return *m_geometry; }
+    [[nodiscard]] const TriangleSurface& surface() const { return *m_geometry; }
 
-    [[nodiscard]] bool hasMesh() const { return mesh_ != nullptr; }
-    [[nodiscard]] Mesh& mesh() { return *mesh_; }
-    [[nodiscard]] const Mesh& mesh() const { return *mesh_; }
+    /* Properties */
+    [[nodiscard]] MaterialProperties& material() { return m_material; }
+    [[nodiscard]] const MaterialProperties& material() const { return m_material; }
 
-    // ========================================================================
-    // Properties and State
-    // ========================================================================
+    [[nodiscard]] EntityState& kinematic() { return m_kinematic; }
+    [[nodiscard]] const EntityState& kinematic() const { return m_kinematic; }
 
-    [[nodiscard]] BodyProperties& properties() { return properties_; }
-    [[nodiscard]] const BodyProperties& properties() const { return properties_; }
+    void assignMaterial(const MaterialProperties& props);
+    void assignKinematic(const EntityState& state);
 
-    [[nodiscard]] BodyState& state() { return state_; }
-    [[nodiscard]] const BodyState& state() const { return state_; }
+    [[nodiscard]] const TextType& identifier() const { return m_identifier; }
 
-    void setProperties(const BodyProperties& props);
-    void setState(const BodyState& state);
+    /* Dynamics */
+    [[nodiscard]] bool isMovable() const { return m_material.isMovable(); }
 
-    [[nodiscard]] const String& name() const { return name_; }
+    void accumulateForce(const Point3& force, const Point3& worldPoint);
+    void accumulateTorque(const Point3& torque);
+    void resetAccumulators();
 
-    // ========================================================================
-    // Dynamics
-    // ========================================================================
+    [[nodiscard]] const Point3& totalForce() const { return m_forceSum; }
+    [[nodiscard]] const Point3& totalTorque() const { return m_torqueSum; }
 
-    [[nodiscard]] bool isDynamic() const { return properties_.isDynamic(); }
+    [[nodiscard]] const Matrix33& worldInertiaInverse();
 
-    /// Apply a force at a world-space point
-    void applyForce(const Vec3& force, const Vec3& worldPoint);
-
-    /// Apply a torque in world space
-    void applyTorque(const Vec3& torque);
-
-    /// Clear accumulated forces and torques
-    void clearAccumulators();
-
-    [[nodiscard]] const Vec3& accumulatedForce() const { return forceAccum_; }
-    [[nodiscard]] const Vec3& accumulatedTorque() const { return torqueAccum_; }
-
-    /// Get world-space inverse inertia tensor
-    [[nodiscard]] const Mat3& worldInertiaInv();
-
-    // ========================================================================
-    // Bounds
-    // ========================================================================
-
-    /// Get world-space AABB (computed lazily)
-    [[nodiscard]] AABB& worldBounds();
+    /* Bounds */
+    [[nodiscard]] BoundingBox3D& worldExtent();
 
 private:
-    void updateWorldBounds();
-    void syncWorldInertia();
+    void recomputeWorldExtent();
+    void refreshWorldInertia();
 
-    String name_;
-    SharedPtr<Mesh> mesh_;
-    BodyProperties properties_;
-    BodyState state_;
+    TextType m_identifier;
+    JointPtr<TriangleSurface> m_geometry;
+    MaterialProperties m_material;
+    EntityState m_kinematic;
 
-    Vec3 forceAccum_  = Vec3::Zero();
-    Vec3 torqueAccum_ = Vec3::Zero();
+    Point3 m_forceSum   = Point3::Zero();
+    Point3 m_torqueSum  = Point3::Zero();
 
-    AABB worldBounds_;
-    Mat3 worldInertiaInv_ = Mat3::Identity();
+    BoundingBox3D m_worldExtent;
+    Matrix33 m_worldInertiaInv = Matrix33::Identity();
 
-    bool boundsDirty_   = true;
-    bool inertiaDirty_  = true;
+    bool m_extentStale   = true;
+    bool m_inertiaStale  = true;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using BodyState = phys3d::EntityState;
+    using RigidBody = phys3d::DynamicEntity;
+}
+
+#endif // PHYS3D_DYNAMIC_ENTITY_HPP

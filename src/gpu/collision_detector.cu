@@ -1,400 +1,419 @@
-/**
- * @file collision_detector.cu
- * @brief CUDA implementation of GPU collision detection.
+/*
+ * Implementation: CUDA Narrow Phase Detection
  */
 #include <cstdio>
 #include <algorithm>
 
 #include "collision_detector.cuh"
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-// ============================================================================
-// CUDA Kernels
-// ============================================================================
+/* ========== Kernel Implementations ========== */
 
-__global__ void detectBVHPlaneCollisionKernel(
-    const Float3* vertices,
-    const BVHNodeDevice* nodes,
-    const Int* primIndices,
-    const Int3* triangles,
-    Int numTriangles,
-    Float3 bodyPos,
-    Float4 bodyOrientation,
-    PlaneDevice planeWorld,
-    Int bodyIdx,
-    ContactDevice* contacts,
-    Int* contactCount,
-    Int maxContacts,
-    Int* visitedVertices,
-    Int numVertices)
+__global__ void kernelDetectPlaneCollision(
+    const CudaFloat3* pointData,
+    const DeviceTreeNode* nodeData,
+    const IntType* faceOrderData,
+    const CudaInt3* faceData,
+    IntType faceTotal,
+    CudaFloat3 entityPos,
+    CudaFloat4 entityRot,
+    DevicePlane worldPlane,
+    IntType entityIdx,
+    DeviceContact* contactBuffer,
+    IntType* contactCounter,
+    IntType contactLimit,
+    IntType* processedPoints,
+    IntType pointTotal)
 {
-    Int leafId = blockIdx.x * blockDim.x + threadIdx.x;
-    if (leafId >= numTriangles) return;
+    IntType leafId = blockIdx.x * blockDim.x + threadIdx.x;
+    if (leafId >= faceTotal) return;
 
-    Int nodeIdx = numTriangles - 1 + leafId;
-    BVHNodeDevice node = nodes[nodeIdx];
+    IntType nodeIdx = faceTotal - 1 + leafId;
+    DeviceTreeNode node = nodeData[nodeIdx];
 
-    Float4 qInv = make_float4(-bodyOrientation.x, -bodyOrientation.y,
-                              -bodyOrientation.z, bodyOrientation.w);
-    Float3 planeLocalNormal = rotateByQuat(planeWorld.normal, qInv);
-    Float planeLocalOffset = planeWorld.offset - dot(planeWorld.normal, bodyPos);
+    CudaFloat4 rotInv = make_float4(-entityRot.x, -entityRot.y,
+                                     -entityRot.z, entityRot.w);
+    CudaFloat3 localNormal = applyQuaternion(worldPlane.direction, rotInv);
+    RealType localOffset = worldPlane.offset - innerProduct(worldPlane.direction, entityPos);
 
-    if (!aabbIntersectsPlane(node.bounds, planeLocalNormal, planeLocalOffset))
+    if (!boundsPlaneOverlap(node.volume, localNormal, localOffset))
         return;
 
-    Int primIdx = primIndices[leafId];
-    Int3 tri = triangles[primIdx];
-    Int vertIds[3] = {tri.x, tri.y, tri.z};
+    IntType primIdx = faceOrderData[leafId];
+    CudaInt3 face = faceData[primIdx];
+    IntType vertIds[3] = {face.x, face.y, face.z};
 
-    for (Int k = 0; k < 3; ++k) {
-        Int vid = vertIds[k];
-        Int wasVisited = atomicExch(&visitedVertices[vid], 1);
-        if (wasVisited) continue;
+    for (IntType k = 0; k < 3; ++k) 
+    {
+        IntType vid = vertIds[k];
+        IntType alreadyProcessed = atomicExch(&processedPoints[vid], 1);
+        if (alreadyProcessed) continue;
 
-        Float3 vLocal = vertices[vid];
-        Float dist = dot(vLocal, planeLocalNormal) - planeLocalOffset;
+        CudaFloat3 localPt = pointData[vid];
+        RealType signedDist = innerProduct(localPt, localNormal) - localOffset;
 
-        if (dist < 0.0f) {
-            Float3 vWorld = rotateByQuat(vLocal, bodyOrientation) + bodyPos;
-            Int idx = atomicAdd(contactCount, 1);
-            if (idx < maxContacts) {
-                ContactDevice contact;
-                contact.bodyIndexA = -1;
-                contact.bodyIndexB = bodyIdx;
-                contact.position = vWorld;
-                contact.normal = planeWorld.normal;
-                contact.depth = -dist;
-                contacts[idx] = contact;
+        if (signedDist < static_cast<RealType>(0)) 
+        {
+            CudaFloat3 worldPt = applyQuaternion(localPt, entityRot) + entityPos;
+            IntType idx = atomicAdd(contactCounter, 1);
+            if (idx < contactLimit) 
+            {
+                DeviceContact contact;
+                contact.entityIdxA = -1;
+                contact.entityIdxB = entityIdx;
+                contact.worldPoint = worldPt;
+                contact.worldNormal = worldPlane.direction;
+                contact.penetration = -signedDist;
+                contactBuffer[idx] = contact;
             }
         }
     }
 }
 
-__device__ Float3 closestPointOnTriangle(Float3 p, Float3 a, Float3 b, Float3 c) {
-    Float3 ab = b - a;
-    Float3 ac = c - a;
-    Float3 ap = p - a;
+__device__ CudaFloat3 nearestPointOnTriangle(CudaFloat3 query, CudaFloat3 v0, CudaFloat3 v1, CudaFloat3 v2) 
+{
+    CudaFloat3 e01 = v1 - v0;
+    CudaFloat3 e02 = v2 - v0;
+    CudaFloat3 v0q = query - v0;
 
-    Float d1 = dot(ab, ap);
-    Float d2 = dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    RealType d1 = innerProduct(e01, v0q);
+    RealType d2 = innerProduct(e02, v0q);
+    if (d1 <= static_cast<RealType>(0) && d2 <= static_cast<RealType>(0)) return v0;
 
-    Float3 bp = p - b;
-    Float d3 = dot(ab, bp);
-    Float d4 = dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return b;
+    CudaFloat3 v1q = query - v1;
+    RealType d3 = innerProduct(e01, v1q);
+    RealType d4 = innerProduct(e02, v1q);
+    if (d3 >= static_cast<RealType>(0) && d4 <= d3) return v1;
 
-    Float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
-        Float v = d1 / (d1 - d3);
-        return a + ab * v;
+    RealType vc = d1 * d4 - d3 * d2;
+    if (vc <= static_cast<RealType>(0) && d1 >= static_cast<RealType>(0) && d3 <= static_cast<RealType>(0)) 
+    {
+        RealType t = d1 / (d1 - d3);
+        return v0 + e01 * t;
     }
 
-    Float3 cp = p - c;
-    Float d5 = dot(ab, cp);
-    Float d6 = dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return c;
+    CudaFloat3 v2q = query - v2;
+    RealType d5 = innerProduct(e01, v2q);
+    RealType d6 = innerProduct(e02, v2q);
+    if (d6 >= static_cast<RealType>(0) && d5 <= d6) return v2;
 
-    Float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
-        Float w = d2 / (d2 - d6);
-        return a + ac * w;
+    RealType vb = d5 * d2 - d1 * d6;
+    if (vb <= static_cast<RealType>(0) && d2 >= static_cast<RealType>(0) && d6 <= static_cast<RealType>(0)) 
+    {
+        RealType t = d2 / (d2 - d6);
+        return v0 + e02 * t;
     }
 
-    Float va = d3 * d6 - d5 * d4;
-    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
-        Float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + (c - b) * w;
+    RealType va = d3 * d6 - d5 * d4;
+    if (va <= static_cast<RealType>(0) && (d4 - d3) >= static_cast<RealType>(0) && (d5 - d6) >= static_cast<RealType>(0)) 
+    {
+        RealType t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return v1 + (v2 - v1) * t;
     }
 
-    Float denom = 1.0f / (va + vb + vc);
-    Float v = vb * denom;
-    Float w = vc * denom;
-    return a + ab * v + ac * w;
+    RealType denomInv = static_cast<RealType>(1) / (va + vb + vc);
+    RealType u = vb * denomInv;
+    RealType w = vc * denomInv;
+    return v0 + e01 * u + e02 * w;
 }
 
-__global__ void detectBodyBodyCollisionKernel(
-    const Float3* verticesA,
-    const BVHNodeDevice* nodesA,
-    const Int* primIndicesA,
-    const Int3* trianglesA,
-    Int numNodesA,
-    Float3 posA,
-    Float4 orientationA,
-    const Float3* verticesB,
-    Int numVerticesB,
-    Float3 posB,
-    Float4 orientationB,
-    Int bodyIdxA,
-    Int bodyIdxB,
-    ContactDevice* contacts,
-    Int* contactCount,
-    Int maxContacts,
-    Float collisionThreshold)
+__global__ void kernelDetectEntityCollision(
+    const CudaFloat3* pointsA,
+    const DeviceTreeNode* nodesA,
+    const IntType* faceOrderA,
+    const CudaInt3* facesA,
+    IntType nodeCountA,
+    CudaFloat3 posA,
+    CudaFloat4 rotA,
+    const CudaFloat3* pointsB,
+    IntType pointCountB,
+    CudaFloat3 posB,
+    CudaFloat4 rotB,
+    IntType entityIdxA,
+    IntType entityIdxB,
+    DeviceContact* contactBuffer,
+    IntType* contactCounter,
+    IntType contactLimit,
+    RealType proximityThreshold)
 {
-    Int vid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (vid >= numVerticesB) return;
+    IntType vid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vid >= pointCountB) return;
 
-    Float3 vLocalB = verticesB[vid];
-    Float3 vWorld = rotateByQuat(vLocalB, orientationB) + posB;
-    Float4 qInvA = make_float4(-orientationA.x, -orientationA.y,
-                               -orientationA.z, orientationA.w);
-    Float3 pLocalA = rotateByQuat(vWorld - posA, qInvA);
+    CudaFloat3 localPtB = pointsB[vid];
+    CudaFloat3 worldPt = applyQuaternion(localPtB, rotB) + posB;
+    CudaFloat4 rotAInv = make_float4(-rotA.x, -rotA.y, -rotA.z, rotA.w);
+    CudaFloat3 queryInA = applyQuaternion(worldPt - posA, rotAInv);
 
-    Int stack[64];
-    Int stackPtr = 0;
-    stack[stackPtr++] = 0;
+    IntType traversalStack[64];
+    IntType stackTop = 0;
+    traversalStack[stackTop++] = 0;
 
-    Float minDistSq = collisionThreshold * collisionThreshold;
-    Float3 closestNormal = make_float3(0, 0, 0);
-    Float3 closestPoint = make_float3(0, 0, 0);
-    bool found = false;
+    RealType minDistSq = proximityThreshold * proximityThreshold;
+    CudaFloat3 nearestNormal = make_float3(0, 0, 0);
+    CudaFloat3 nearestPoint = make_float3(0, 0, 0);
+    bool foundContact = false;
 
-    while (stackPtr > 0) {
-        Int nodeIdx = stack[--stackPtr];
-        BVHNodeDevice node = nodesA[nodeIdx];
+    while (stackTop > 0) 
+    {
+        IntType currentNode = traversalStack[--stackTop];
+        DeviceTreeNode node = nodesA[currentNode];
 
-        Float distSq = 0.0f;
-        for (Int i = 0; i < 3; ++i) {
-            Float coord = (i == 0) ? pLocalA.x : ((i == 1) ? pLocalA.y : pLocalA.z);
-            Float boxMin = (i == 0) ? node.bounds.min.x : 
-                          ((i == 1) ? node.bounds.min.y : node.bounds.min.z);
-            Float boxMax = (i == 0) ? node.bounds.max.x : 
-                          ((i == 1) ? node.bounds.max.y : node.bounds.max.z);
+        RealType boxDistSq = static_cast<RealType>(0);
+        for (IntType axis = 0; axis < 3; ++axis) 
+        {
+            RealType coord = (axis == 0) ? queryInA.x : ((axis == 1) ? queryInA.y : queryInA.z);
+            RealType boxMin = (axis == 0) ? node.volume.lo.x : 
+                              ((axis == 1) ? node.volume.lo.y : node.volume.lo.z);
+            RealType boxMax = (axis == 0) ? node.volume.hi.x : 
+                              ((axis == 1) ? node.volume.hi.y : node.volume.hi.z);
 
-            if (coord < boxMin) distSq += (boxMin - coord) * (boxMin - coord);
-            else if (coord > boxMax) distSq += (coord - boxMax) * (coord - boxMax);
+            if (coord < boxMin) boxDistSq += (boxMin - coord) * (boxMin - coord);
+            else if (coord > boxMax) boxDistSq += (coord - boxMax) * (coord - boxMax);
         }
-        if (distSq > minDistSq) continue;
+        if (boxDistSq > minDistSq) continue;
 
-        if (node.isLeaf()) {
-            Int primIdx = primIndicesA[node.firstPrim];
-            Int3 tri = trianglesA[primIdx];
+        if (node.terminal()) 
+        {
+            IntType primIdx = faceOrderA[node.leafStart];
+            CudaInt3 face = facesA[primIdx];
 
-            Float3 p0 = verticesA[tri.x];
-            Float3 p1 = verticesA[tri.y];
-            Float3 p2 = verticesA[tri.z];
+            CudaFloat3 v0 = pointsA[face.x];
+            CudaFloat3 v1 = pointsA[face.y];
+            CudaFloat3 v2 = pointsA[face.z];
 
-            Float3 closest = closestPointOnTriangle(pLocalA, p0, p1, p2);
-            Float3 diff = pLocalA - closest;
-            Float dSq = dot(diff, diff);
+            CudaFloat3 closest = nearestPointOnTriangle(queryInA, v0, v1, v2);
+            CudaFloat3 diff = queryInA - closest;
+            RealType distSq = innerProduct(diff, diff);
 
-            if (dSq < minDistSq && dSq > 1e-12f) {
-                minDistSq = dSq;
-                closestPoint = closest;
+            if (distSq < minDistSq && distSq > static_cast<RealType>(1e-12)) 
+            {
+                minDistSq = distSq;
+                nearestPoint = closest;
 
-                Float3 edge1 = p1 - p0;
-                Float3 edge2 = p2 - p0;
-                Float3 normal = cross(edge1, edge2);
-                Float len = sqrtf(dot(normal, normal));
-                if (len > 1e-6f) {
-                    normal = normal * (1.0f / len);
-                    if (dot(normal, diff) < 0) normal = normal * (-1.0f);
-                    closestNormal = normal;
-                    found = true;
+                CudaFloat3 edge1 = v1 - v0;
+                CudaFloat3 edge2 = v2 - v0;
+                CudaFloat3 faceNormal = crossProduct(edge1, edge2);
+                RealType normalLen = sqrtf(innerProduct(faceNormal, faceNormal));
+                if (normalLen > static_cast<RealType>(1e-6)) 
+                {
+                    faceNormal = faceNormal * (static_cast<RealType>(1) / normalLen);
+                    if (innerProduct(faceNormal, diff) < static_cast<RealType>(0)) 
+                        faceNormal = faceNormal * static_cast<RealType>(-1);
+                    nearestNormal = faceNormal;
+                    foundContact = true;
                 }
             }
-        } else {
-            if (node.left >= 0 && stackPtr < 63) stack[stackPtr++] = node.left;
-            if (node.right >= 0 && stackPtr < 63) stack[stackPtr++] = node.right;
+        } 
+        else 
+        {
+            if (node.leftChild >= 0 && stackTop < 63) traversalStack[stackTop++] = node.leftChild;
+            if (node.rightChild >= 0 && stackTop < 63) traversalStack[stackTop++] = node.rightChild;
         }
     }
 
-    if (found) {
-        Int idx = atomicAdd(contactCount, 1);
-        if (idx < maxContacts) {
-            ContactDevice contact;
-            contact.bodyIndexA = bodyIdxA;
-            contact.bodyIndexB = bodyIdxB;
-            contact.position = vWorld;
-            contact.normal = rotateByQuat(closestNormal, orientationA);
-            contact.depth = sqrtf(minDistSq);
-            contacts[idx] = contact;
+    if (foundContact) 
+    {
+        IntType idx = atomicAdd(contactCounter, 1);
+        if (idx < contactLimit) 
+        {
+            DeviceContact contact;
+            contact.entityIdxA = entityIdxA;
+            contact.entityIdxB = entityIdxB;
+            contact.worldPoint = worldPt;
+            contact.worldNormal = applyQuaternion(nearestNormal, rotA);
+            contact.penetration = sqrtf(minDistSq);
+            contactBuffer[idx] = contact;
         }
     }
 }
 
-// ============================================================================
-// CollisionDetectorGPU Implementation
-// ============================================================================
+/* ========== NarrowPhaseDetector Implementation ========== */
 
-CollisionDetectorGPU::CollisionDetectorGPU() {
-    cudaMalloc(&dContacts_, maxContacts_ * sizeof(ContactDevice));
-    cudaMalloc(&dContactCount_, sizeof(Int));
-    broadphase_ = std::make_unique<BroadphaseGPU>();
-}
-
-CollisionDetectorGPU::~CollisionDetectorGPU() {
-    free();
-}
-
-void CollisionDetectorGPU::free() {
-    if (dContacts_) cudaFree(dContacts_);
-    if (dContactCount_) cudaFree(dContactCount_);
-    if (dPlanes_) cudaFree(dPlanes_);
-    dContacts_ = nullptr;
-    dContactCount_ = nullptr;
-    dPlanes_ = nullptr;
-    broadphase_.reset();
-}
-
-void CollisionDetectorGPU::setBVH(BVHBuilderGPU* bvhBuilder) {
-    bvh_ = bvhBuilder;
-}
-
-void CollisionDetectorGPU::broadphaseDetect(const Vector<Vec3>& aabbMins,
-                                             const Vector<Vec3>& aabbMaxs,
-                                             Vector<CollisionPair>& outPairs) {
-    if (broadphase_) {
-        broadphase_->detectPairs(aabbMins, aabbMaxs, outPairs);
-    }
-}
-
-void CollisionDetectorGPU::detectBodyEnvironment(
-    Int bodyIdx,
-    const BodyTransformDevice& transform,
-    const PlaneDevice* planes,
-    Int numPlanes,
-    Vector<ContactDevice>& outContacts)
+NarrowPhaseDetector::NarrowPhaseDetector() 
 {
-    if (!bvh_ || bvh_->vertexCount() == 0) return;
+    cudaMalloc(&m_dContactBuffer, m_contactLimit * sizeof(DeviceContact));
+    cudaMalloc(&m_dContactCounter, sizeof(IntType));
+    m_broadPhase = std::make_unique<BroadPhaseDetector>();
+}
 
-    if (numPlanes_ != numPlanes) {
-        if (dPlanes_) cudaFree(dPlanes_);
-        cudaMalloc(&dPlanes_, numPlanes * sizeof(PlaneDevice));
-        numPlanes_ = numPlanes;
-    }
-    cudaMemcpy(dPlanes_, planes, numPlanes * sizeof(PlaneDevice),
-               cudaMemcpyHostToDevice);
+NarrowPhaseDetector::~NarrowPhaseDetector() 
+{
+    release();
+}
 
-    Int* dVisited;
-    Int numVerts = bvh_->vertexCount();
-    cudaMalloc(&dVisited, numVerts * sizeof(Int));
-    cudaMemset(dVisited, 0, numVerts * sizeof(Int));
+void NarrowPhaseDetector::release() 
+{
+    if (m_dContactBuffer) cudaFree(m_dContactBuffer);
+    if (m_dContactCounter) cudaFree(m_dContactCounter);
+    if (m_dPlaneBuffer) cudaFree(m_dPlaneBuffer);
+    m_dContactBuffer = nullptr;
+    m_dContactCounter = nullptr;
+    m_dPlaneBuffer = nullptr;
+    m_broadPhase.reset();
+}
 
-    Int zero = 0;
-    cudaMemcpy(dContactCount_, &zero, sizeof(Int), cudaMemcpyHostToDevice);
+void NarrowPhaseDetector::assignTree(DeviceTreeBuilder* treeBuilder) 
+{
+    m_activeTree = treeBuilder;
+}
 
-    Float3 bodyPos = make_float3(transform.position.x,
-                                  transform.position.y,
-                                  transform.position.z);
-    Float4 bodyOri = transform.orientation;
-
-    Int blockSize = 256;
-    Int numBlocks = (bvh_->triangleCount() + blockSize - 1) / blockSize;
-
-    for (Int p = 0; p < numPlanes; ++p) {
-        cudaMemset(dVisited, 0, numVerts * sizeof(Int));
-
-        detectBVHPlaneCollisionKernel<<<numBlocks, blockSize>>>(
-            bvh_->deviceVertices(),
-            bvh_->deviceNodes(),
-            bvh_->devicePrimIndices(),
-            bvh_->deviceTriangles(),
-            bvh_->triangleCount(),
-            bodyPos,
-            bodyOri,
-            planes[p],
-            bodyIdx,
-            dContacts_,
-            dContactCount_,
-            maxContacts_,
-            dVisited,
-            numVerts);
-    }
-
-    cudaFree(dVisited);
-
-    Int contactCount;
-    cudaMemcpy(&contactCount, dContactCount_, sizeof(Int), cudaMemcpyDeviceToHost);
-    contactCount = std::min(contactCount, maxContacts_);
-
-    outContacts.resize(contactCount);
-    if (contactCount > 0) {
-        cudaMemcpy(outContacts.data(), dContacts_,
-                   contactCount * sizeof(ContactDevice), cudaMemcpyDeviceToHost);
+void NarrowPhaseDetector::performBroadPhase(const DynArray<Point3>& boundsMin,
+                                             const DynArray<Point3>& boundsMax,
+                                             DynArray<EntityPair>& candidatePairs) 
+{
+    if (m_broadPhase) 
+    {
+        m_broadPhase->findCandidatePairs(boundsMin, boundsMax, candidatePairs);
     }
 }
 
-void CollisionDetectorGPU::detectBodyBody(
-    Int bodyAIdx,
-    const BodyTransformDevice& transformA,
-    BVHBuilderGPU* bvhA,
-    Int bodyBIdx,
-    const BodyTransformDevice& transformB,
-    BVHBuilderGPU* bvhB,
-    Vector<ContactDevice>& outContacts)
+void NarrowPhaseDetector::detectEntityEnvironment(
+    IntType entityIdx,
+    const EntityTransform& transform,
+    const DevicePlane* planeArray,
+    IntType planeCount,
+    DynArray<DeviceContact>& contactResults)
 {
-    if (!bvhA || !bvhB) return;
+    if (!m_activeTree || m_activeTree->totalPoints() == 0) return;
 
-    Int zero = 0;
-    cudaMemcpy(dContactCount_, &zero, sizeof(Int), cudaMemcpyHostToDevice);
+    if (m_planeBufferSize != planeCount) 
+    {
+        if (m_dPlaneBuffer) cudaFree(m_dPlaneBuffer);
+        cudaMalloc(&m_dPlaneBuffer, planeCount * sizeof(DevicePlane));
+        m_planeBufferSize = planeCount;
+    }
+    cudaMemcpy(m_dPlaneBuffer, planeArray, planeCount * sizeof(DevicePlane), cudaMemcpyHostToDevice);
 
-    constexpr Float kCollisionThreshold = 0.5f;
+    IntType* dProcessedFlags;
+    IntType pointTotal = m_activeTree->totalPoints();
+    cudaMalloc(&dProcessedFlags, pointTotal * sizeof(IntType));
+    cudaMemset(dProcessedFlags, 0, pointTotal * sizeof(IntType));
 
-    Int blockSize = 256;
-    Int numBlocks = (bvhB->vertexCount() + blockSize - 1) / blockSize;
+    IntType zero = 0;
+    cudaMemcpy(m_dContactCounter, &zero, sizeof(IntType), cudaMemcpyHostToDevice);
 
-    Float3 posA = make_float3(transformA.position.x,
-                               transformA.position.y,
-                               transformA.position.z);
-    Float3 posB = make_float3(transformB.position.x,
-                               transformB.position.y,
-                               transformB.position.z);
+    CudaFloat3 entityPos = make_float3(transform.translation.x,
+                                        transform.translation.y,
+                                        transform.translation.z);
+    CudaFloat4 entityRot = transform.rotation;
 
-    detectBodyBodyCollisionKernel<<<numBlocks, blockSize>>>(
-        bvhA->deviceVertices(),
-        bvhA->deviceNodes(),
-        bvhA->devicePrimIndices(),
-        bvhA->deviceTriangles(),
-        bvhA->nodeCount(),
+    IntType threadsPerBlock = 256;
+    IntType numBlocks = (m_activeTree->totalFaces() + threadsPerBlock - 1) / threadsPerBlock;
+
+    for (IntType p = 0; p < planeCount; ++p) 
+    {
+        cudaMemset(dProcessedFlags, 0, pointTotal * sizeof(IntType));
+
+        kernelDetectPlaneCollision<<<numBlocks, threadsPerBlock>>>(
+            m_activeTree->pointBuffer(),
+            m_activeTree->nodeBuffer(),
+            m_activeTree->faceOrderBuffer(),
+            m_activeTree->faceBuffer(),
+            m_activeTree->totalFaces(),
+            entityPos,
+            entityRot,
+            planeArray[p],
+            entityIdx,
+            m_dContactBuffer,
+            m_dContactCounter,
+            m_contactLimit,
+            dProcessedFlags,
+            pointTotal);
+    }
+
+    cudaFree(dProcessedFlags);
+
+    IntType contactCount;
+    cudaMemcpy(&contactCount, m_dContactCounter, sizeof(IntType), cudaMemcpyDeviceToHost);
+    contactCount = std::min(contactCount, m_contactLimit);
+
+    contactResults.resize(contactCount);
+    if (contactCount > 0) 
+    {
+        cudaMemcpy(contactResults.data(), m_dContactBuffer,
+                   contactCount * sizeof(DeviceContact), cudaMemcpyDeviceToHost);
+    }
+}
+
+void NarrowPhaseDetector::detectEntityEntity(
+    IntType entityAIdx,
+    const EntityTransform& transformA,
+    DeviceTreeBuilder* treeA,
+    IntType entityBIdx,
+    const EntityTransform& transformB,
+    DeviceTreeBuilder* treeB,
+    DynArray<DeviceContact>& contactResults)
+{
+    if (!treeA || !treeB) return;
+
+    IntType zero = 0;
+    cudaMemcpy(m_dContactCounter, &zero, sizeof(IntType), cudaMemcpyHostToDevice);
+
+    constexpr RealType kProximityThreshold = static_cast<RealType>(0.5);
+
+    IntType threadsPerBlock = 256;
+    IntType numBlocks = (treeB->totalPoints() + threadsPerBlock - 1) / threadsPerBlock;
+
+    CudaFloat3 posA = make_float3(transformA.translation.x,
+                                   transformA.translation.y,
+                                   transformA.translation.z);
+    CudaFloat3 posB = make_float3(transformB.translation.x,
+                                   transformB.translation.y,
+                                   transformB.translation.z);
+
+    kernelDetectEntityCollision<<<numBlocks, threadsPerBlock>>>(
+        treeA->pointBuffer(),
+        treeA->nodeBuffer(),
+        treeA->faceOrderBuffer(),
+        treeA->faceBuffer(),
+        treeA->totalNodes(),
         posA,
-        transformA.orientation,
-        bvhB->deviceVertices(),
-        bvhB->vertexCount(),
+        transformA.rotation,
+        treeB->pointBuffer(),
+        treeB->totalPoints(),
         posB,
-        transformB.orientation,
-        bodyAIdx,
-        bodyBIdx,
-        dContacts_,
-        dContactCount_,
-        maxContacts_,
-        kCollisionThreshold);
+        transformB.rotation,
+        entityAIdx,
+        entityBIdx,
+        m_dContactBuffer,
+        m_dContactCounter,
+        m_contactLimit,
+        kProximityThreshold);
 
-    // Symmetric: B vs A
-    numBlocks = (bvhA->vertexCount() + blockSize - 1) / blockSize;
+    numBlocks = (treeA->totalPoints() + threadsPerBlock - 1) / threadsPerBlock;
 
-    detectBodyBodyCollisionKernel<<<numBlocks, blockSize>>>(
-        bvhB->deviceVertices(),
-        bvhB->deviceNodes(),
-        bvhB->devicePrimIndices(),
-        bvhB->deviceTriangles(),
-        bvhB->nodeCount(),
+    kernelDetectEntityCollision<<<numBlocks, threadsPerBlock>>>(
+        treeB->pointBuffer(),
+        treeB->nodeBuffer(),
+        treeB->faceOrderBuffer(),
+        treeB->faceBuffer(),
+        treeB->totalNodes(),
         posB,
-        transformB.orientation,
-        bvhA->deviceVertices(),
-        bvhA->vertexCount(),
+        transformB.rotation,
+        treeA->pointBuffer(),
+        treeA->totalPoints(),
         posA,
-        transformA.orientation,
-        bodyBIdx,
-        bodyAIdx,
-        dContacts_,
-        dContactCount_,
-        maxContacts_,
-        kCollisionThreshold);
+        transformA.rotation,
+        entityBIdx,
+        entityAIdx,
+        m_dContactBuffer,
+        m_dContactCounter,
+        m_contactLimit,
+        kProximityThreshold);
 
-    Int contactCount;
-    cudaMemcpy(&contactCount, dContactCount_, sizeof(Int), cudaMemcpyDeviceToHost);
-    contactCount = std::min(contactCount, maxContacts_);
+    IntType contactCount;
+    cudaMemcpy(&contactCount, m_dContactCounter, sizeof(IntType), cudaMemcpyDeviceToHost);
+    contactCount = std::min(contactCount, m_contactLimit);
 
-    outContacts.resize(contactCount);
-    if (contactCount > 0) {
-        cudaMemcpy(outContacts.data(), dContacts_,
-                   contactCount * sizeof(ContactDevice), cudaMemcpyDeviceToHost);
+    contactResults.resize(contactCount);
+    if (contactCount > 0) 
+    {
+        cudaMemcpy(contactResults.data(), m_dContactBuffer,
+                   contactCount * sizeof(DeviceContact), cudaMemcpyDeviceToHost);
     }
 }
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d

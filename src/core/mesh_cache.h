@@ -1,61 +1,52 @@
-/**
- * @file mesh_cache.h
- * @brief Thread-safe mesh caching system using weak pointers.
+/*
+ * Thread-Safe Resource Pool for Triangle Surfaces
  */
-#pragma once
+#ifndef PHYS3D_RESOURCE_POOL_HPP
+#define PHYS3D_RESOURCE_POOL_HPP
 
 #include "common.h"
 
 #include <mutex>
 #include <unordered_map>
 
-namespace rigid {
+namespace phys3d {
 
-class Mesh;
+class TriangleSurface;
 
-/**
- * @class MeshCache
- * @brief Singleton cache for mesh objects with automatic cleanup.
- *
- * Uses weak_ptr to allow meshes to be freed when no longer referenced.
- * Thread-safe for concurrent access.
+/*
+ * SurfaceResourcePool - Singleton cache with automatic cleanup
+ * Uses weak references to allow unused surfaces to be freed
  */
-class MeshCache {
+class SurfaceResourcePool 
+{
 public:
-    /// Get the global singleton instance
-    static MeshCache& instance();
+    static SurfaceResourcePool& global();
 
-    /**
-     * @brief Acquire a mesh from cache or load from file.
-     * @param path Path to the mesh file.
-     * @param buildBVH Whether to build BVH when loading.
-     * @return Shared pointer to the mesh, or nullptr on failure.
-     */
-    SharedPtr<Mesh> acquire(const String& path, bool buildBVH = true);
+    JointPtr<TriangleSurface> fetch(const TextType& resourcePath, bool constructTree = true);
 
-    /// Clear all cached meshes
-    void clear();
-
-    /// Remove expired entries from cache
-    void cleanup();
-
-    /// Get the number of currently cached meshes
-    [[nodiscard]] size_t size() const;
+    void purgeAll();
+    void removeExpired();
+    [[nodiscard]] size_t entryCount() const;
 
 private:
-    MeshCache() = default;
-    ~MeshCache() = default;
+    SurfaceResourcePool() = default;
+    ~SurfaceResourcePool() = default;
 
-    // Non-copyable
-    MeshCache(const MeshCache&) = delete;
-    MeshCache& operator=(const MeshCache&) = delete;
+    SurfaceResourcePool(const SurfaceResourcePool&) = delete;
+    SurfaceResourcePool& operator=(const SurfaceResourcePool&) = delete;
 
-    SharedPtr<Mesh> loadMesh(const String& path, bool buildBVH);
+    JointPtr<TriangleSurface> loadFromDisk(const TextType& resourcePath, bool constructTree);
 
-    using CacheMap = std::unordered_map<String, std::weak_ptr<Mesh>>;
+    using ResourceMap = std::unordered_map<TextType, std::weak_ptr<TriangleSurface>>;
 
-    mutable std::mutex mutex_;
-    CacheMap cache_;
+    mutable std::mutex m_guard;
+    ResourceMap m_storage;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using MeshCache = phys3d::SurfaceResourcePool;
+}
+
+#endif // PHYS3D_RESOURCE_POOL_HPP

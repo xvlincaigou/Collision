@@ -12,7 +12,7 @@
 | 依赖项 | 版本要求 |
 |--------|----------|
 | CMake | ≥ 3.17 |
-| CUDA Toolkit | 12.3 |
+| CUDA Toolkit | 12.3/12.5 |
 | TBB (libtbb-dev) | - |
 | Eigen3 | ≥ 3.3 |
 | C++ 编译器 | g++ 9.4.0 |
@@ -164,8 +164,6 @@ bash scripts/run.sh
 
 ### 3.2 命令行参数
 
-程序支持丰富的命令行参数配置：
-
 ```bash
 ./CollisionSimulator [options]
 
@@ -263,6 +261,19 @@ render/
 ```
 
 ---
+
+### Windows平台编译
+要求：
+- VS 2022
+- vckpg
+- cmake
+
+```pwsh
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="D:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+cmake --build build --config Release
+```
+
+对于编译好的 exe 文件，可以使用与unix平台上相同的参数去使用。
 
 ## 4. 程序运行主要流程
 

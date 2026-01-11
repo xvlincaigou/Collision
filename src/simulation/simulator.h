@@ -1,85 +1,85 @@
-/**
- * @file simulator.h
- * @brief High-level simulation controller.
+/*
+ * High-Level Simulation Controller
  */
-#pragma once
+#ifndef PHYS3D_SIMULATION_CONTROLLER_HPP
+#define PHYS3D_SIMULATION_CONTROLLER_HPP
 
 #include "core/common.h"
 #include "core/mesh_cache.h"
 #include "physics/integrator.h"
 #include "scene/scene.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @class Simulator
- * @brief High-level interface for running rigid body simulations.
+/*
+ * SimulationController - Main interface for running physics simulations
  */
-class Simulator {
+class SimulationController 
+{
 public:
-    Simulator() = default;
+    struct EntityDescriptor 
+    {
+        TextType identifier;
+        TextType geometryPath;
+        RealType mass = static_cast<RealType>(1);
+        RealType scale = static_cast<RealType>(1);
+        RealType bounciness = static_cast<RealType>(0.5);
+        RealType friction = static_cast<RealType>(0.5);
 
-    /// Initialize the simulator
+        static EntityDescriptor Standard(const TextType& id, const TextType& path, RealType m = static_cast<RealType>(1)) 
+        {
+            EntityDescriptor desc;
+            desc.identifier = id;
+            desc.geometryPath = path;
+            desc.mass = m;
+            return desc;
+        }
+    };
+
+    SimulationController();
+
     void initialize();
-
-    /// Reset to initial state
+    void tick();
     void reset();
 
-    /// Advance simulation by one time step
-    void step();
+    DynamicEntity& createEntity(const TextType& identifier, const TextType& geometryPath,
+                                 RealType mass = static_cast<RealType>(1));
 
-    // ========================================================================
-    // Configuration
-    // ========================================================================
+    DynamicEntity& createEntity(const TextType& identifier, const TextType& geometryPath,
+                                 RealType mass, RealType scale, RealType bounciness, RealType friction);
 
-    /// Add a rigid body with mesh and mass
-    RigidBody& addBody(const String& name, const String& meshPath,
-                       Float mass = 1.0f);
+    DynamicEntity& createEntity(const EntityDescriptor& descriptor);
 
-    /// Add a rigid body with full customization
-    RigidBody& addBody(const String& name, const String& meshPath,
-                       Float mass, Float scale, Float restitution, Float friction);
+    void setBoundaryLimits(const Point3& lowerBound, const Point3& upperBound);
 
-    /// Set the simulation environment bounds
-    void setEnvironmentBounds(const Vec3& minCorner, const Vec3& maxCorner);
+    void setIterationLimit(IntType limit) { m_integrator.setIterationLimit(limit); }
+    void setConvergenceThreshold(RealType thresh) { m_integrator.setConvergenceThreshold(thresh); }
+    void setDeltaTime(RealType dt) { m_integrator.setDeltaTime(dt); }
 
-    /// Set solver parameters
-    void setMaxIterations(Int iter) { integrator_.setMaxIterations(iter); }
-    void setTolerance(Float tol) { integrator_.setTolerance(tol); }
-    void setTimeStep(Float dt) { integrator_.setTimeStep(dt); }
+    /* Export */
+    void exportFrame(const TextType& outputPath);
 
-    // ========================================================================
-    // Export
-    // ========================================================================
+    /* Accessors */
+    [[nodiscard]] World& world() { return m_world; }
+    [[nodiscard]] const World& world() const { return m_world; }
 
-    /// Export current frame to OBJ file
-    void exportFrame(const String& filename);
-
-    // ========================================================================
-    // Accessors
-    // ========================================================================
-
-    [[nodiscard]] Scene& scene() { return scene_; }
-    [[nodiscard]] const Scene& scene() const { return scene_; }
-
-    [[nodiscard]] Int currentFrame() const { return frameCount_; }
+    [[nodiscard]] IntType currentFrame() const { return m_frameNumber; }
 
 private:
-    Scene scene_;
-    Integrator integrator_;
-    Int frameCount_ = 0;
+    DynamicEntity& instantiateEntity(const TextType& identifier, const TextType& geometryPath);
+    void configureMaterial(DynamicEntity& entity, RealType mass, RealType bounciness, RealType friction);
+    void configureScale(DynamicEntity& entity, RealType scale);
+    void resetFrameCounter();
+
+    World m_world;
+    TimeIntegrator m_integrator;
+    IntType m_frameNumber = 0;
 };
 
-// ============================================================================
-// Scene Export Utility
-// ============================================================================
+}  // namespace phys3d
 
-/**
- * @brief Export a scene to an OBJ file.
- * @param scene The scene to export.
- * @param filename Output filename.
- * @return True if successful.
- */
-bool exportSceneToOBJ(Scene& scene, const String& filename);
+namespace rigid {
+    using Simulator = phys3d::SimulationController;
+}
 
-}  // namespace rigid
+#endif // PHYS3D_SIMULATION_CONTROLLER_HPP

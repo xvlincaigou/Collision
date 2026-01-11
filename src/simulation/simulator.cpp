@@ -1,6 +1,5 @@
-/**
- * @file simulator.cpp
- * @brief Implementation of the Simulator class.
+/*
+ * Implementation: SimulationController class
  */
 #include "simulator.h"
 
@@ -9,142 +8,217 @@
 #include <iomanip>
 #include <iostream>
 
-namespace rigid {
+namespace phys3d {
 
-void Simulator::initialize() {
-    integrator_.initialize(scene_);
-    frameCount_ = 0;
-}
+SimulationController::SimulationController() = default;
 
-void Simulator::reset() {
-    scene_.clearBodies();
-    frameCount_ = 0;
-}
+namespace {
 
-void Simulator::step() {
-    integrator_.step(scene_);
-    ++frameCount_;
-}
+struct GeometryIndexer 
+{
+    DynArray<size_t> pointCounts;
+    DynArray<size_t> pointOffsets;
+    DynArray<bool> validEntries;
+};
 
-RigidBody& Simulator::addBody(const String& name, const String& meshPath,
-                              Float mass) {
-    return addBody(name, meshPath, mass, 1.0f, 0.5f, 0.5f);
-}
+GeometryIndexer buildGeometryIndexer(World& world) 
+{
+    const IntType entityCount = world.entityCount();
+    GeometryIndexer indexer;
+    indexer.pointCounts.assign(entityCount, 0);
+    indexer.pointOffsets.assign(entityCount, 0);
+    indexer.validEntries.assign(entityCount, false);
 
-RigidBody& Simulator::addBody(const String& name, const String& meshPath,
-                              Float mass, Float scale, Float restitution, Float friction) {
-    RigidBody& body = scene_.createBody(name);
-
-    auto meshPtr = MeshCache::instance().acquire(meshPath, true);
-    body.setMesh(meshPtr);
-
-    BodyProperties props;
-    props.setMass(mass);
-    props.restitution = restitution;
-    props.friction = friction;
-    props.finalize();
-    body.setProperties(props);
-
-    // Set initial scale
-    BodyState state = body.state();
-    state.scale = scale;
-    body.setState(state);
-
-    return body;
-}
-
-void Simulator::setEnvironmentBounds(const Vec3& minCorner, const Vec3& maxCorner) {
-    scene_.setEnvironmentBounds(minCorner, maxCorner);
-}
-
-void Simulator::exportFrame(const String& filename) {
-    exportSceneToOBJ(scene_, filename);
-}
-
-// ============================================================================
-// Scene Export
-// ============================================================================
-
-bool exportSceneToOBJ(Scene& scene, const String& filename) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open file for writing: " << filename << std::endl;
-        return false;
-    }
-
-    const Int n = scene.bodyCount();
-
-    // Precompute vertex counts and offsets
-    Vector<size_t> vertexCounts(n, 0);
-    Vector<size_t> vertexOffsets(n, 0);
-    Vector<bool> valid(n, false);
-
-    size_t runningOffset = 1;  // OBJ indices start at 1
-    for (Int i = 0; i < n; ++i) {
-        RigidBody* body = scene.body(i);
-        if (!body || !body->hasMesh()) {
-            vertexOffsets[i] = runningOffset;
+    size_t runningOffset = 1;
+    for (IntType i = 0; i < entityCount; ++i) 
+    {
+        DynamicEntity* entity = world.entity(i);
+        if (!entity || !entity->hasSurface()) 
+        {
+            indexer.pointOffsets[i] = runningOffset;
             continue;
         }
 
-        const Mesh& mesh = body->mesh();
-        valid[i] = true;
-        vertexCounts[i] = mesh.vertexCount();
-        vertexOffsets[i] = runningOffset;
-        runningOffset += vertexCounts[i];
+        const TriangleSurface& surface = entity->surface();
+        indexer.validEntries[i] = true;
+        indexer.pointCounts[i] = surface.pointCount();
+        indexer.pointOffsets[i] = runningOffset;
+        runningOffset += indexer.pointCounts[i];
     }
 
-    // Generate OBJ blocks in parallel
-    Vector<String> blocks(n);
+    return indexer;
+}
 
-    tbb::parallel_for(tbb::blocked_range<Int>(0, n),
-        [&](const tbb::blocked_range<Int>& range) {
-            for (Int i = range.begin(); i != range.end(); ++i) {
-                if (!valid[i]) continue;
+TextType generateOBJBlock(World& world, IntType entityIdx, const GeometryIndexer& indexer) 
+{
+    if (!indexer.validEntries[entityIdx]) 
+    {
+        return {};
+    }
 
-                RigidBody* body = scene.body(i);
-                if (!body || !body->hasMesh()) continue;
+    DynamicEntity* entity = world.entity(entityIdx);
+    if (!entity || !entity->hasSurface()) 
+    {
+        return {};
+    }
 
-                const Mesh& mesh = body->mesh();
-                const BodyState& state = body->state();
-                const auto& verts = mesh.vertices();
-                const auto& tris = mesh.triangles();
-                const size_t offset = vertexOffsets[i];
+    const TriangleSurface& surface = entity->surface();
+    const EntityState& state = entity->kinematic();
+    const auto& pointCloud = surface.pointCloud();
+    const auto& faceIndices = surface.faceIndices();
+    const size_t offset = indexer.pointOffsets[entityIdx];
 
-                std::ostringstream ss;
-                ss.setf(std::ios::fmtflags(0), std::ios::floatfield);
-                ss.precision(9);
+    std::ostringstream buffer;
+    buffer.setf(std::ios::fmtflags(0), std::ios::floatfield);
+    buffer.precision(9);
 
-                // Object name
-                ss << "o " << mesh.name() << "_" << i << "\n";
+    buffer << "o " << surface.identifier() << "_" << entityIdx << "\n";
 
-                // Vertices in world space
-                for (const auto& vLocal : verts) {
-                    Vec3 vWorld = state.localToWorld(vLocal);
-                    ss << "v " << vWorld.x() << " "
-                       << vWorld.y() << " "
-                       << vWorld.z() << "\n";
-                }
+    for (const auto& localPt : pointCloud) 
+    {
+        Point3 worldPt = state.transformToWorld(localPt);
+        buffer << "v " << worldPt.x() << " "
+               << worldPt.y() << " "
+               << worldPt.z() << "\n";
+    }
 
-                // Faces (OBJ is 1-based)
-                for (const auto& t : tris) {
-                    ss << "f " << (t[0] + offset) << " "
-                       << (t[1] + offset) << " "
-                       << (t[2] + offset) << "\n";
-                }
+    for (const auto& face : faceIndices) 
+    {
+        buffer << "f " << (face[0] + offset) << " "
+               << (face[1] + offset) << " "
+               << (face[2] + offset) << "\n";
+    }
 
-                blocks[i] = ss.str();
-            }
-        });
+    return buffer.str();
+}
 
-    // Write all blocks to file
-    for (Int i = 0; i < n; ++i) {
-        if (valid[i]) {
+void writeOBJOutput(std::ofstream& file, const DynArray<TextType>& blocks,
+                    const DynArray<bool>& validFlags) 
+{
+    const IntType blockCount = static_cast<IntType>(blocks.size());
+    for (IntType i = 0; i < blockCount; ++i) 
+    {
+        if (validFlags[i]) 
+        {
             file << blocks[i];
         }
     }
+}
+
+bool serializeWorldToOBJ(World& world, const TextType& outputPath) 
+{
+    std::ofstream outFile(outputPath);
+    if (!outFile.is_open()) 
+    {
+        std::cerr << "Failed to open file for writing: " << outputPath << std::endl;
+        return false;
+    }
+
+    const IntType entityCount = world.entityCount();
+    GeometryIndexer indexer = buildGeometryIndexer(world);
+    DynArray<TextType> blocks(entityCount);
+
+    tbb::parallel_for(tbb::blocked_range<IntType>(0, entityCount),
+        [&](const tbb::blocked_range<IntType>& range) {
+            for (IntType i = range.begin(); i != range.end(); ++i) 
+            {
+                blocks[i] = generateOBJBlock(world, i, indexer);
+            }
+        });
+
+    writeOBJOutput(outFile, blocks, indexer.validEntries);
 
     return true;
 }
 
-}  // namespace rigid
+}  // namespace
+
+void SimulationController::initialize() 
+{
+    m_integrator.prepare(m_world);
+    resetFrameCounter();
+}
+
+void SimulationController::reset() 
+{
+    m_world.destroyAllEntities();
+    resetFrameCounter();
+}
+
+void SimulationController::tick() 
+{
+    m_integrator.advance(m_world);
+    ++m_frameNumber;
+}
+
+DynamicEntity& SimulationController::createEntity(const TextType& identifier, 
+                                                   const TextType& geometryPath,
+                                                   RealType mass) 
+{
+    auto descriptor = EntityDescriptor::Standard(identifier, geometryPath, mass);
+    return createEntity(descriptor);
+}
+
+DynamicEntity& SimulationController::createEntity(const TextType& identifier, 
+                                                   const TextType& geometryPath,
+                                                   RealType mass, RealType scale, 
+                                                   RealType bounciness, RealType friction) 
+{
+    EntityDescriptor descriptor = EntityDescriptor::Standard(identifier, geometryPath, mass);
+    descriptor.scale = scale;
+    descriptor.bounciness = bounciness;
+    descriptor.friction = friction;
+    return createEntity(descriptor);
+}
+
+DynamicEntity& SimulationController::createEntity(const EntityDescriptor& descriptor) 
+{
+    DynamicEntity& entity = instantiateEntity(descriptor.identifier, descriptor.geometryPath);
+    configureMaterial(entity, descriptor.mass, descriptor.bounciness, descriptor.friction);
+    configureScale(entity, descriptor.scale);
+    return entity;
+}
+
+DynamicEntity& SimulationController::instantiateEntity(const TextType& identifier, 
+                                                        const TextType& geometryPath) 
+{
+    DynamicEntity& entity = m_world.spawnEntity(identifier);
+    auto surfacePtr = SurfaceResourcePool::global().fetch(geometryPath, true);
+    entity.assignSurface(surfacePtr);
+    return entity;
+}
+
+void SimulationController::configureMaterial(DynamicEntity& entity, RealType mass,
+                                              RealType bounciness, RealType friction) 
+{
+    MaterialProperties material;
+    material.assignMass(mass);
+    material.bounciness = bounciness;
+    material.surfaceFriction = friction;
+    material.prepare();
+    entity.assignMaterial(material);
+}
+
+void SimulationController::configureScale(DynamicEntity& entity, RealType scale) 
+{
+    EntityState state = entity.kinematic();
+    state.scaleFactor = scale;
+    entity.assignKinematic(state);
+}
+
+void SimulationController::resetFrameCounter() 
+{
+    m_frameNumber = 0;
+}
+
+void SimulationController::setBoundaryLimits(const Point3& lowerBound, const Point3& upperBound) 
+{
+    m_world.configureBounds(lowerBound, upperBound);
+}
+
+void SimulationController::exportFrame(const TextType& outputPath) 
+{
+    serializeWorldToOBJ(m_world, outputPath);
+}
+
+}  // namespace phys3d

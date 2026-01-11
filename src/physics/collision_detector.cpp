@@ -1,6 +1,5 @@
-/**
- * @file collision_detector.cpp
- * @brief Implementation of the CollisionDetector class.
+/*
+ * Implementation: CollisionSystem class
  */
 #include "collision_detector.h"
 
@@ -12,470 +11,497 @@
 #include "gpu/broadphase.cuh"
 #endif
 
-namespace rigid {
+namespace phys3d {
 
-// ============================================================================
-// Constructor/Destructor
-// ============================================================================
+/* ========== Constructor/Destructor ========== */
 
 #if defined(RIGID_USE_CUDA)
 
-CollisionDetector::CollisionDetector() : useGPU_(true) {
-    gpuDetector_ = std::make_unique<gpu::CollisionDetectorGPU>();
+CollisionSystem::CollisionSystem() : m_useDevice(true) 
+{
+    m_deviceDetector = std::make_unique<gpu::NarrowPhaseDetector>();
 }
 
-CollisionDetector::~CollisionDetector() = default;
+CollisionSystem::~CollisionSystem() = default;
 
 #else
 
-CollisionDetector::CollisionDetector() : useGPU_(false) {}
-CollisionDetector::~CollisionDetector() = default;
+CollisionSystem::CollisionSystem() : m_useDevice(false) {}
+CollisionSystem::~CollisionSystem() = default;
 
 #endif
 
-// ============================================================================
-// Main Detection Entry Point
-// ============================================================================
+/* ========== Main Detection Entry Point ========== */
 
-void CollisionDetector::detectCollisions(Scene& scene) {
-    if (useGPU_) {
-        detectCollisionsGPU(scene);
+void CollisionSystem::performDetection(World& world) 
+{
+    if (m_useDevice) 
+    {
+        performDeviceDetection(world);
         return;
     }
 
-    clear();
+    reset();
 
-    Environment& env = scene.environment();
-    Int bodyCount = scene.bodyCount();
+    Boundaries& env = world.boundaries();
+    IntType entityCount = world.entityCount();
 
-    // Body vs Environment
-    for (Int i = 0; i < bodyCount; ++i) {
-        RigidBody* body = scene.body(i);
-        if (!body || !body->hasMesh()) continue;
-        detectBodyEnvironment(i, *body, env);
+    for (IntType i = 0; i < entityCount; ++i) 
+    {
+        DynamicEntity* entity = world.entity(i);
+        if (!entity || !entity->hasSurface()) continue;
+        detectEntityEnvironment(i, *entity, env);
     }
 
-    // Body vs Body (O(N^2) broadphase)
-    for (Int i = 0; i < bodyCount; ++i) {
-        RigidBody* bodyA = scene.body(i);
-        if (!bodyA || !bodyA->hasMesh()) continue;
+    for (IntType i = 0; i < entityCount; ++i) 
+    {
+        DynamicEntity* entityA = world.entity(i);
+        if (!entityA || !entityA->hasSurface()) continue;
 
-        for (Int j = i + 1; j < bodyCount; ++j) {
-            RigidBody* bodyB = scene.body(j);
-            if (!bodyB || !bodyB->hasMesh()) continue;
+        for (IntType j = i + 1; j < entityCount; ++j) 
+        {
+            DynamicEntity* entityB = world.entity(j);
+            if (!entityB || !entityB->hasSurface()) continue;
 
-            // Broadphase: AABB intersection
-            if (bodyA->worldBounds().intersects(bodyB->worldBounds())) {
-                detectBodyBody(i, *bodyA, j, *bodyB);
+            if (entityA->worldExtent().overlaps(entityB->worldExtent())) 
+            {
+                detectEntityEntity(i, *entityA, j, *entityB);
             }
         }
     }
 }
 
-// ============================================================================
-// Body vs Environment
-// ============================================================================
+/* ========== Entity vs Environment ========== */
 
-void CollisionDetector::detectBodyEnvironment(Int bodyIdx, RigidBody& body,
-                                               Environment& env) {
-    Mesh& mesh = body.mesh();
-    const BodyState& state = body.state();
-    Mat3 rot = state.rotationMatrix();
-    Vec3 pos = state.position;
+void CollisionSystem::detectEntityEnvironment(IntType entityIdx, DynamicEntity& entity, Boundaries& env) 
+{
+    TriangleSurface& surface = entity.surface();
+    const EntityState& state = entity.kinematic();
+    Matrix33 rotMat = state.orientationMatrix();
+    Point3 translation = state.translation;
 
-    const Vector<Vec3>& vertices = mesh.vertices();
-    static Vector<bool> visitedVerts;
-    visitedVerts.resize(vertices.size());
+    const DynArray<Point3>& pointCloud = surface.pointCloud();
+    static DynArray<bool> visitedPoints;
+    visitedPoints.resize(pointCloud.size());
 
-    for (Int pIdx = 0; pIdx < Environment::boundaryCount(); ++pIdx) {
-        Plane& planeWorld = env.plane(static_cast<Environment::BoundaryId>(pIdx));
+    for (IntType pIdx = 0; pIdx < Boundaries::planeCount(); ++pIdx) 
+    {
+        HalfSpace3D& worldPlane = env.planeAt(static_cast<Boundaries::PlaneId>(pIdx));
 
-        // Quick AABB vs plane test
-        const AABB& wb = body.worldBounds();
-        Vec3 supportMin;
-        for (int k = 0; k < 3; ++k) {
-            supportMin[k] = (planeWorld.normal[k] >= 0) ? wb.min_pt[k] : wb.max_pt[k];
+        const BoundingBox3D& wb = entity.worldExtent();
+        Point3 supportMin;
+        for (int k = 0; k < 3; ++k) 
+        {
+            supportMin[k] = (worldPlane.direction[k] >= static_cast<RealType>(0)) ? 
+                            wb.corner_lo[k] : wb.corner_hi[k];
         }
-        Float distMin = supportMin.dot(planeWorld.normal) - planeWorld.offset;
+        RealType distMin = supportMin.dot(worldPlane.direction) - worldPlane.distance;
 
-        if (distMin > 1e-4f) continue;  // No collision possible
+        if (distMin > static_cast<RealType>(1e-4)) continue;
 
-        // Transform plane to local space
-        Plane planeLocal;
-        planeLocal.normal = rot.transpose() * planeWorld.normal;
-        planeLocal.offset = planeWorld.offset - planeWorld.normal.dot(pos);
+        HalfSpace3D localPlane;
+        localPlane.direction = rotMat.transpose() * worldPlane.direction;
+        localPlane.distance = worldPlane.distance - worldPlane.direction.dot(translation);
 
-        if (mesh.hasBVH()) {
-            std::fill(visitedVerts.begin(), visitedVerts.end(), false);
-            traverseBVHPlane(
-                mesh.bvh().node(mesh.bvh().rootIndex()),
-                mesh.bvh(), planeLocal, vertices, mesh.triangles(),
-                rot, pos, bodyIdx, planeWorld.normal, visitedVerts);
-        } else {
-            // Brute force fallback
-            for (const auto& vLocal : vertices) {
-                Float distLocal = vLocal.dot(planeLocal.normal) - planeLocal.offset;
-                if (distLocal < 0.0f) {
-                    Contact contact;
-                    contact.bodyIndexA = -1;  // Environment
-                    contact.bodyIndexB = bodyIdx;
+        if (surface.hasAccelerator()) 
+        {
+            std::fill(visitedPoints.begin(), visitedPoints.end(), false);
+            traverseTreeAgainstPlane(
+                surface.accelerator().nodeAt(surface.accelerator().rootIdx()),
+                surface.accelerator(), localPlane, pointCloud, surface.faceIndices(),
+                rotMat, translation, entityIdx, worldPlane.direction, visitedPoints);
+        } 
+        else 
+        {
+            for (const auto& localPt : pointCloud) 
+            {
+                RealType distLocal = localPt.dot(localPlane.direction) - localPlane.distance;
+                if (distLocal < static_cast<RealType>(0)) 
+                {
+                    ContactPoint contact;
+                    contact.entityA = -1;
+                    contact.entityB = entityIdx;
                     contact.depth = -distLocal;
-                    contact.normal = planeWorld.normal;
-                    contact.position = rot * vLocal + pos;
-                    contacts_.push_back(contact);
+                    contact.direction = worldPlane.direction;
+                    contact.location = rotMat * localPt + translation;
+                    m_contactList.push_back(contact);
                 }
             }
         }
     }
 }
 
-// ============================================================================
-// Body vs Body
-// ============================================================================
+/* ========== Entity vs Entity ========== */
 
-void CollisionDetector::detectBodyBody(Int idxA, RigidBody& bodyA,
-                                        Int idxB, RigidBody& bodyB) {
-    // Symmetric check: vertices of A vs mesh B, and vice versa
-    detectVertexMesh(idxA, bodyA, idxB, bodyB);
-    detectVertexMesh(idxB, bodyB, idxA, bodyA);
+void CollisionSystem::detectEntityEntity(IntType idxA, DynamicEntity& entityA,
+                                          IntType idxB, DynamicEntity& entityB) 
+{
+    detectPointsAgainstSurface(idxA, entityA, idxB, entityB);
+    detectPointsAgainstSurface(idxB, entityB, idxA, entityA);
 }
 
-void CollisionDetector::detectVertexMesh(Int dynamicIdx, RigidBody& dynamic,
-                                          Int staticIdx, RigidBody& statik) {
-    const auto& vertsDyn = dynamic.mesh().vertices();
-    const AABB& boundsStatic = statik.worldBounds();
+void CollisionSystem::detectPointsAgainstSurface(IntType dynamicIdx, DynamicEntity& dynamic,
+                                                  IntType staticIdx, DynamicEntity& stationary) 
+{
+    const auto& dynamicPoints = dynamic.surface().pointCloud();
+    const BoundingBox3D& staticBounds = stationary.worldExtent();
 
-    Mat3 rotDyn = dynamic.state().rotationMatrix();
-    Vec3 posDyn = dynamic.state().position;
-    Mat3 rotStat = statik.state().rotationMatrix();
-    Vec3 posStat = statik.state().position;
-    Mat3 rotStatInv = rotStat.transpose();
+    Matrix33 rotDyn = dynamic.kinematic().orientationMatrix();
+    Point3 posDyn = dynamic.kinematic().translation;
+    Matrix33 rotStat = stationary.kinematic().orientationMatrix();
+    Point3 posStat = stationary.kinematic().translation;
+    Matrix33 rotStatInv = rotStat.transpose();
 
-    const Mesh& meshStat = statik.mesh();
-    const auto& vertsStat = meshStat.vertices();
-    const auto& trisStat = meshStat.triangles();
+    const TriangleSurface& staticSurf = stationary.surface();
+    const auto& staticPoints = staticSurf.pointCloud();
+    const auto& staticFaces = staticSurf.faceIndices();
 
-    constexpr Float kCollisionThreshold = 0.5f;
+    constexpr RealType kProximityThreshold = static_cast<RealType>(0.5);
 
-    for (const auto& vLocal : vertsDyn) {
-        Vec3 vWorld = rotDyn * vLocal + posDyn;
+    for (const auto& localPt : dynamicPoints) 
+    {
+        Point3 worldPt = rotDyn * localPt + posDyn;
 
-        // Quick world AABB check
-        if (!boundsStatic.contains(vWorld)) {
+        if (!staticBounds.enclosesPoint(worldPt)) 
+        {
             continue;
         }
 
-        // Transform to static body's local space
-        Vec3 pLocalStat = rotStatInv * (vWorld - posStat);
+        Point3 queryInStatic = rotStatInv * (worldPt - posStat);
 
-        Float minDistSq = kCollisionThreshold * kCollisionThreshold;
-        Vec3 closestNormalLocal = Vec3::Zero();
-        Vec3 closestPtLocal = Vec3::Zero();
-        bool found = false;
+        RealType minDistSq = kProximityThreshold * kProximityThreshold;
+        Point3 closestNormal = Point3::Zero();
+        Point3 closestPoint = Point3::Zero();
+        bool foundContact = false;
 
-        if (meshStat.hasBVH()) {
-            traverseBVHPoint(
-                meshStat.bvh().node(meshStat.bvh().rootIndex()),
-                meshStat.bvh(), pLocalStat, vertsStat, trisStat,
-                minDistSq, closestNormalLocal, closestPtLocal, found);
-        } else {
-            // Brute force fallback
-            const AABB& lb = meshStat.localBounds();
-            if (lb.contains(pLocalStat)) {
-                for (const auto& tri : trisStat) {
-                    const Vec3& p0 = vertsStat[tri[0]];
-                    const Vec3& p1 = vertsStat[tri[1]];
-                    const Vec3& p2 = vertsStat[tri[2]];
-                    if (checkTriangleCollision(pLocalStat, p0, p1, p2,
-                                               minDistSq, closestNormalLocal,
-                                               closestPtLocal)) {
-                        found = true;
+        if (staticSurf.hasAccelerator()) 
+        {
+            traverseTreeAgainstPoint(
+                staticSurf.accelerator().nodeAt(staticSurf.accelerator().rootIdx()),
+                staticSurf.accelerator(), queryInStatic, staticPoints, staticFaces,
+                minDistSq, closestNormal, closestPoint, foundContact);
+        } 
+        else 
+        {
+            const BoundingBox3D& lb = staticSurf.localExtent();
+            if (lb.enclosesPoint(queryInStatic)) 
+            {
+                for (const auto& face : staticFaces) 
+                {
+                    const Point3& p0 = staticPoints[face[0]];
+                    const Point3& p1 = staticPoints[face[1]];
+                    const Point3& p2 = staticPoints[face[2]];
+                    if (testTrianglePenetration(queryInStatic, p0, p1, p2,
+                                                 minDistSq, closestNormal, closestPoint)) 
+                    {
+                        foundContact = true;
                     }
                 }
             }
         }
 
-        if (found) {
-            Contact contact;
-            contact.bodyIndexA = staticIdx;
-            contact.bodyIndexB = dynamicIdx;
+        if (foundContact) 
+        {
+            ContactPoint contact;
+            contact.entityA = staticIdx;
+            contact.entityB = dynamicIdx;
             contact.depth = std::sqrt(minDistSq);
-            contact.normal = rotStat * closestNormalLocal;
-            contact.position = vWorld;
-            contacts_.push_back(contact);
+            contact.direction = rotStat * closestNormal;
+            contact.location = worldPt;
+            m_contactList.push_back(contact);
         }
     }
 }
 
-// ============================================================================
-// BVH Traversal
-// ============================================================================
+/* ========== Tree Traversal ========== */
 
-void CollisionDetector::traverseBVHPlane(
-    const BVHNode& node, const BVH& bvh,
-    const Plane& planeLocal,
-    const Vector<Vec3>& vertices,
-    const Vector<Triangle>& triangles,
-    const Mat3& bodyRot, const Vec3& bodyPos,
-    Int bodyIdx, const Vec3& planeWorldNormal,
-    Vector<bool>& visitedVerts)
+void CollisionSystem::traverseTreeAgainstPlane(
+    const TreeNode& node, const SpatialTree& tree,
+    const HalfSpace3D& localPlane,
+    const DynArray<Point3>& pointCloud,
+    const DynArray<Triplet3i>& faces,
+    const Matrix33& rotMat, const Point3& translation,
+    IntType entityIdx, const Point3& worldPlaneNormal,
+    DynArray<bool>& visitedPoints)
 {
-    // Test AABB vs plane
-    Vec3 center = node.bounds.center();
-    Vec3 extents = node.bounds.extents();
+    Point3 center = node.volume.midpoint();
+    Point3 extent = node.volume.halfSize();
 
-    Float r = extents.x() * std::abs(planeLocal.normal.x()) +
-              extents.y() * std::abs(planeLocal.normal.y()) +
-              extents.z() * std::abs(planeLocal.normal.z());
-    Float s = planeLocal.normal.dot(center) - planeLocal.offset;
+    RealType r = extent.x() * std::abs(localPlane.direction.x()) +
+                 extent.y() * std::abs(localPlane.direction.y()) +
+                 extent.z() * std::abs(localPlane.direction.z());
+    RealType s = localPlane.direction.dot(center) - localPlane.distance;
 
-    if (s > r) return;  // AABB is entirely on positive side
+    if (s > r) return;
 
-    if (node.isLeaf()) {
-        const auto& indices = bvh.primitiveIndices();
-        Int end = node.firstPrim + node.primCount;
+    if (node.isTerminal()) 
+    {
+        const auto& indices = tree.faceOrdering();
+        IntType end = node.leafStart + node.leafCount;
 
-        for (Int i = node.firstPrim; i < end; ++i) {
-            Int triIdx = indices[i];
-            const Triangle& tri = triangles[triIdx];
+        for (IntType i = node.leafStart; i < end; ++i) 
+        {
+            IntType faceIdx = indices[i];
+            const Triplet3i& face = faces[faceIdx];
 
-            for (int k = 0; k < 3; ++k) {
-                Int vIdx = tri[k];
-                if (visitedVerts[vIdx]) continue;
-                visitedVerts[vIdx] = true;
+            for (int k = 0; k < 3; ++k) 
+            {
+                IntType vIdx = face[k];
+                if (visitedPoints[vIdx]) continue;
+                visitedPoints[vIdx] = true;
 
-                const Vec3& vLocal = vertices[vIdx];
-                Float dist = vLocal.dot(planeLocal.normal) - planeLocal.offset;
+                const Point3& localPt = pointCloud[vIdx];
+                RealType dist = localPt.dot(localPlane.direction) - localPlane.distance;
 
-                if (dist < 0.0f) {
-                    Contact contact;
-                    contact.bodyIndexA = -1;
-                    contact.bodyIndexB = bodyIdx;
+                if (dist < static_cast<RealType>(0)) 
+                {
+                    ContactPoint contact;
+                    contact.entityA = -1;
+                    contact.entityB = entityIdx;
                     contact.depth = -dist;
-                    contact.normal = planeWorldNormal;
-                    contact.position = bodyRot * vLocal + bodyPos;
-                    contacts_.push_back(contact);
+                    contact.direction = worldPlaneNormal;
+                    contact.location = rotMat * localPt + translation;
+                    m_contactList.push_back(contact);
                 }
             }
         }
-    } else {
-        if (node.left != -1) {
-            traverseBVHPlane(bvh.node(node.left), bvh, planeLocal,
-                             vertices, triangles, bodyRot, bodyPos,
-                             bodyIdx, planeWorldNormal, visitedVerts);
+    } 
+    else 
+    {
+        if (node.childLeft != -1) 
+        {
+            traverseTreeAgainstPlane(tree.nodeAt(node.childLeft), tree, localPlane,
+                                     pointCloud, faces, rotMat, translation,
+                                     entityIdx, worldPlaneNormal, visitedPoints);
         }
-        if (node.right != -1) {
-            traverseBVHPlane(bvh.node(node.right), bvh, planeLocal,
-                             vertices, triangles, bodyRot, bodyPos,
-                             bodyIdx, planeWorldNormal, visitedVerts);
+        if (node.childRight != -1) 
+        {
+            traverseTreeAgainstPlane(tree.nodeAt(node.childRight), tree, localPlane,
+                                     pointCloud, faces, rotMat, translation,
+                                     entityIdx, worldPlaneNormal, visitedPoints);
         }
     }
 }
 
-void CollisionDetector::traverseBVHPoint(
-    const BVHNode& node, const BVH& bvh,
-    const Vec3& pointLocal,
-    const Vector<Vec3>& vertices,
-    const Vector<Triangle>& triangles,
-    Float& minDistSq, Vec3& closestNormal,
-    Vec3& closestPos, bool& found)
+void CollisionSystem::traverseTreeAgainstPoint(
+    const TreeNode& node, const SpatialTree& tree,
+    const Point3& queryLocal,
+    const DynArray<Point3>& pointCloud,
+    const DynArray<Triplet3i>& faces,
+    RealType& minDistSq, Point3& closestNormal,
+    Point3& closestPos, bool& foundContact)
 {
-    // Compute squared distance to AABB
-    Float distSq = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        if (pointLocal[i] < node.bounds.min_pt[i]) {
-            Float d = node.bounds.min_pt[i] - pointLocal[i];
-            distSq += d * d;
-        } else if (pointLocal[i] > node.bounds.max_pt[i]) {
-            Float d = pointLocal[i] - node.bounds.max_pt[i];
-            distSq += d * d;
+    RealType boxDistSq = static_cast<RealType>(0);
+    for (int i = 0; i < 3; ++i) 
+    {
+        if (queryLocal[i] < node.volume.corner_lo[i]) 
+        {
+            RealType d = node.volume.corner_lo[i] - queryLocal[i];
+            boxDistSq += d * d;
+        } 
+        else if (queryLocal[i] > node.volume.corner_hi[i]) 
+        {
+            RealType d = queryLocal[i] - node.volume.corner_hi[i];
+            boxDistSq += d * d;
         }
     }
 
-    if (distSq > minDistSq) return;
+    if (boxDistSq > minDistSq) return;
 
-    if (node.isLeaf()) {
-        const auto& indices = bvh.primitiveIndices();
-        Int end = node.firstPrim + node.primCount;
+    if (node.isTerminal()) 
+    {
+        const auto& indices = tree.faceOrdering();
+        IntType end = node.leafStart + node.leafCount;
 
-        for (Int i = node.firstPrim; i < end; ++i) {
-            const Triangle& tri = triangles[indices[i]];
-            const Vec3& p0 = vertices[tri[0]];
-            const Vec3& p1 = vertices[tri[1]];
-            const Vec3& p2 = vertices[tri[2]];
+        for (IntType i = node.leafStart; i < end; ++i) 
+        {
+            const Triplet3i& face = faces[indices[i]];
+            const Point3& p0 = pointCloud[face[0]];
+            const Point3& p1 = pointCloud[face[1]];
+            const Point3& p2 = pointCloud[face[2]];
 
-            if (checkTriangleCollision(pointLocal, p0, p1, p2,
-                                       minDistSq, closestNormal, closestPos)) {
-                found = true;
+            if (testTrianglePenetration(queryLocal, p0, p1, p2,
+                                         minDistSq, closestNormal, closestPos)) 
+            {
+                foundContact = true;
             }
         }
-    } else {
-        if (node.left != -1) {
-            traverseBVHPoint(bvh.node(node.left), bvh, pointLocal,
-                             vertices, triangles, minDistSq,
-                             closestNormal, closestPos, found);
+    } 
+    else 
+    {
+        if (node.childLeft != -1) 
+        {
+            traverseTreeAgainstPoint(tree.nodeAt(node.childLeft), tree, queryLocal,
+                                     pointCloud, faces, minDistSq,
+                                     closestNormal, closestPos, foundContact);
         }
-        if (node.right != -1) {
-            traverseBVHPoint(bvh.node(node.right), bvh, pointLocal,
-                             vertices, triangles, minDistSq,
-                             closestNormal, closestPos, found);
+        if (node.childRight != -1) 
+        {
+            traverseTreeAgainstPoint(tree.nodeAt(node.childRight), tree, queryLocal,
+                                     pointCloud, faces, minDistSq,
+                                     closestNormal, closestPos, foundContact);
         }
     }
 }
 
-// ============================================================================
-// GPU Implementation
-// ============================================================================
+/* ========== GPU Implementation ========== */
 
 #if defined(RIGID_USE_CUDA)
 
-void CollisionDetector::detectCollisionsGPU(Scene& scene) {
-    clear();
+void CollisionSystem::performDeviceDetection(World& world) 
+{
+    reset();
 
-    Environment& env = scene.environment();
-    Int bodyCount = scene.bodyCount();
+    Boundaries& env = world.boundaries();
+    IntType entityCount = world.entityCount();
 
-    // Body vs Environment
-    for (Int i = 0; i < bodyCount; ++i) {
-        RigidBody* body = scene.body(i);
-        if (!body || !body->hasMesh()) continue;
+    for (IntType i = 0; i < entityCount; ++i) 
+    {
+        DynamicEntity* entity = world.entity(i);
+        if (!entity || !entity->hasSurface()) continue;
 
-        const BVH& bvh = body->mesh().bvh();
-        if (!bvh.hasGPUData()) continue;
+        const SpatialTree& tree = entity->surface().accelerator();
+        if (!tree.hasDeviceData()) continue;
 
-        gpuDetector_->setBVH(bvh.gpuBuilder());
+        m_deviceDetector->assignTree(tree.deviceBuilder());
 
-        gpu::BodyTransformDevice transform;
-        const BodyState& state = body->state();
-        transform.position = make_float3(state.position.x(),
-                                         state.position.y(),
-                                         state.position.z());
-        transform.orientation = make_float4(state.orientation.x(),
-                                            state.orientation.y(),
-                                            state.orientation.z(),
-                                            state.orientation.w());
+        gpu::EntityTransform transform;
+        const EntityState& state = entity->kinematic();
+        transform.translation = make_float3(state.translation.x(),
+                                             state.translation.y(),
+                                             state.translation.z());
+        transform.rotation = make_float4(state.orientation.x(),
+                                          state.orientation.y(),
+                                          state.orientation.z(),
+                                          state.orientation.w());
 
-        Vector<gpu::PlaneDevice> planes(Environment::boundaryCount());
-        for (int p = 0; p < Environment::boundaryCount(); ++p) {
-            const Plane& plane = env.plane(static_cast<Environment::BoundaryId>(p));
-            planes[p].normal = make_float3(plane.normal.x(),
-                                           plane.normal.y(),
-                                           plane.normal.z());
-            planes[p].offset = plane.offset;
+        DynArray<gpu::DevicePlane> planes(Boundaries::planeCount());
+        for (int p = 0; p < Boundaries::planeCount(); ++p) 
+        {
+            const HalfSpace3D& plane = env.planeAt(static_cast<Boundaries::PlaneId>(p));
+            planes[p].direction = make_float3(plane.direction.x(),
+                                               plane.direction.y(),
+                                               plane.direction.z());
+            planes[p].offset = plane.distance;
         }
 
-        Vector<gpu::ContactDevice> gpuContacts;
-        gpuDetector_->detectBodyEnvironment(i, transform, planes.data(),
-                                            static_cast<Int>(planes.size()),
-                                            gpuContacts);
-        convertGPUContacts(gpuContacts);
+        DynArray<gpu::DeviceContact> deviceContacts;
+        m_deviceDetector->detectEntityEnvironment(i, transform, planes.data(),
+                                                   static_cast<IntType>(planes.size()),
+                                                   deviceContacts);
+        convertDeviceContacts(deviceContacts);
     }
 
-    // Body vs Body with GPU broadphase
-    Vector<std::pair<Int, Int>> collisionPairs;
-    broadphaseGPU(scene, collisionPairs);
+    DynArray<std::pair<IntType, IntType>> candidatePairs;
+    deviceBroadPhase(world, candidatePairs);
 
-    for (const auto& pair : collisionPairs) {
-        Int i = pair.first;
-        Int j = pair.second;
+    for (const auto& pair : candidatePairs) 
+    {
+        IntType i = pair.first;
+        IntType j = pair.second;
 
-        RigidBody* bodyA = scene.body(i);
-        RigidBody* bodyB = scene.body(j);
+        DynamicEntity* entityA = world.entity(i);
+        DynamicEntity* entityB = world.entity(j);
 
-        if (!bodyA || !bodyB) continue;
-        if (!bodyA->hasMesh() || !bodyB->hasMesh()) continue;
+        if (!entityA || !entityB) continue;
+        if (!entityA->hasSurface() || !entityB->hasSurface()) continue;
 
-        const BVH& bvhA = bodyA->mesh().bvh();
-        const BVH& bvhB = bodyB->mesh().bvh();
-        if (!bvhA.hasGPUData() || !bvhB.hasGPUData()) continue;
+        const SpatialTree& treeA = entityA->surface().accelerator();
+        const SpatialTree& treeB = entityB->surface().accelerator();
+        if (!treeA.hasDeviceData() || !treeB.hasDeviceData()) continue;
 
-        gpu::BodyTransformDevice transformA, transformB;
-        const BodyState& stateA = bodyA->state();
-        const BodyState& stateB = bodyB->state();
+        gpu::EntityTransform transformA, transformB;
+        const EntityState& stateA = entityA->kinematic();
+        const EntityState& stateB = entityB->kinematic();
 
-        transformA.position = make_float3(stateA.position.x(),
-                                          stateA.position.y(),
-                                          stateA.position.z());
-        transformA.orientation = make_float4(stateA.orientation.x(),
-                                             stateA.orientation.y(),
-                                             stateA.orientation.z(),
-                                             stateA.orientation.w());
-        transformB.position = make_float3(stateB.position.x(),
-                                          stateB.position.y(),
-                                          stateB.position.z());
-        transformB.orientation = make_float4(stateB.orientation.x(),
-                                             stateB.orientation.y(),
-                                             stateB.orientation.z(),
-                                             stateB.orientation.w());
+        transformA.translation = make_float3(stateA.translation.x(),
+                                              stateA.translation.y(),
+                                              stateA.translation.z());
+        transformA.rotation = make_float4(stateA.orientation.x(),
+                                           stateA.orientation.y(),
+                                           stateA.orientation.z(),
+                                           stateA.orientation.w());
+        transformB.translation = make_float3(stateB.translation.x(),
+                                              stateB.translation.y(),
+                                              stateB.translation.z());
+        transformB.rotation = make_float4(stateB.orientation.x(),
+                                           stateB.orientation.y(),
+                                           stateB.orientation.z(),
+                                           stateB.orientation.w());
 
-        Vector<gpu::ContactDevice> gpuContacts;
-        gpuDetector_->detectBodyBody(
-            i, transformA, bvhA.gpuBuilder(),
-            j, transformB, bvhB.gpuBuilder(),
-            gpuContacts);
-        convertGPUContacts(gpuContacts);
-    }
-}
-
-void CollisionDetector::convertGPUContacts(
-    const Vector<gpu::ContactDevice>& gpuContacts)
-{
-    for (const auto& gc : gpuContacts) {
-        Contact contact;
-        contact.bodyIndexA = gc.bodyIndexA;
-        contact.bodyIndexB = gc.bodyIndexB;
-        contact.position = Vec3(gc.position.x, gc.position.y, gc.position.z);
-        contact.normal = Vec3(gc.normal.x, gc.normal.y, gc.normal.z);
-        contact.depth = gc.depth;
-        contacts_.push_back(contact);
+        DynArray<gpu::DeviceContact> deviceContacts;
+        m_deviceDetector->detectEntityEntity(
+            i, transformA, treeA.deviceBuilder(),
+            j, transformB, treeB.deviceBuilder(),
+            deviceContacts);
+        convertDeviceContacts(deviceContacts);
     }
 }
 
-void CollisionDetector::broadphaseGPU(Scene& scene,
-                                       Vector<std::pair<Int, Int>>& pairs)
+void CollisionSystem::convertDeviceContacts(const DynArray<gpu::DeviceContact>& deviceContacts) 
 {
-    Int bodyCount = scene.bodyCount();
-    if (bodyCount < 2) {
-        pairs.clear();
+    for (const auto& dc : deviceContacts) 
+    {
+        ContactPoint contact;
+        contact.entityA = dc.entityIdxA;
+        contact.entityB = dc.entityIdxB;
+        contact.location = Point3(dc.worldPoint.x, dc.worldPoint.y, dc.worldPoint.z);
+        contact.direction = Point3(dc.worldNormal.x, dc.worldNormal.y, dc.worldNormal.z);
+        contact.depth = dc.penetration;
+        m_contactList.push_back(contact);
+    }
+}
+
+void CollisionSystem::deviceBroadPhase(World& world, DynArray<std::pair<IntType, IntType>>& candidatePairs) 
+{
+    IntType entityCount = world.entityCount();
+    if (entityCount < 2) 
+    {
+        candidatePairs.clear();
         return;
     }
 
-    Vector<Vec3> aabbMins(bodyCount);
-    Vector<Vec3> aabbMaxs(bodyCount);
+    DynArray<Point3> boundsMin(entityCount);
+    DynArray<Point3> boundsMax(entityCount);
 
-    for (Int i = 0; i < bodyCount; ++i) {
-        RigidBody* body = scene.body(i);
-        if (body && body->hasMesh()) {
-            AABB& wb = body->worldBounds();
-            aabbMins[i] = wb.min_pt;
-            aabbMaxs[i] = wb.max_pt;
-        } else {
-            aabbMins[i] = Vec3(1e30f, 1e30f, 1e30f);
-            aabbMaxs[i] = Vec3(-1e30f, -1e30f, -1e30f);
+    for (IntType i = 0; i < entityCount; ++i) 
+    {
+        DynamicEntity* entity = world.entity(i);
+        if (entity && entity->hasSurface()) 
+        {
+            BoundingBox3D& wb = entity->worldExtent();
+            boundsMin[i] = wb.corner_lo;
+            boundsMax[i] = wb.corner_hi;
+        } 
+        else 
+        {
+            boundsMin[i] = Point3(1e30f, 1e30f, 1e30f);
+            boundsMax[i] = Point3(-1e30f, -1e30f, -1e30f);
         }
     }
 
-    Vector<gpu::CollisionPair> gpuPairs;
-    gpuDetector_->broadphaseDetect(aabbMins, aabbMaxs, gpuPairs);
+    DynArray<gpu::EntityPair> devicePairs;
+    m_deviceDetector->performBroadPhase(boundsMin, boundsMax, devicePairs);
 
-    pairs.resize(gpuPairs.size());
-    for (size_t i = 0; i < gpuPairs.size(); ++i) {
-        pairs[i] = std::make_pair(gpuPairs[i].bodyA, gpuPairs[i].bodyB);
+    candidatePairs.resize(devicePairs.size());
+    for (size_t i = 0; i < devicePairs.size(); ++i) 
+    {
+        candidatePairs[i] = std::make_pair(devicePairs[i].entityA, devicePairs[i].entityB);
     }
 }
 
 #else
 
-void CollisionDetector::detectCollisionsGPU(Scene& scene) {
-    // Fallback to CPU
-    useGPU_ = false;
-    detectCollisions(scene);
+void CollisionSystem::performDeviceDetection(World& world) 
+{
+    m_useDevice = false;
+    performDetection(world);
 }
 
-void CollisionDetector::convertGPUContacts(const Vector<gpu::ContactDevice>&) {}
+void CollisionSystem::convertDeviceContacts(const DynArray<gpu::DeviceContact>&) {}
 
-void CollisionDetector::broadphaseGPU(Scene&, Vector<std::pair<Int, Int>>&) {}
+void CollisionSystem::deviceBroadPhase(World&, DynArray<std::pair<IntType, IntType>>&) {}
 
 #endif
 
-}  // namespace rigid
+}  // namespace phys3d

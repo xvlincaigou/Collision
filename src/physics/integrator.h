@@ -1,61 +1,62 @@
-/**
- * @file integrator.h
- * @brief Time integrator for rigid body dynamics.
+/*
+ * Time Integration System
  */
-#pragma once
+#ifndef PHYS3D_TIME_INTEGRATOR_HPP
+#define PHYS3D_TIME_INTEGRATOR_HPP
 
 #include "collision_detector.h"
 #include "force_builder.h"
 #include "core/common.h"
 #include "scene/scene.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @class Integrator
- * @brief Implicit Euler integrator with penalty-based collision response.
+/*
+ * TimeIntegrator - Implicit Euler integration with penalty response
  */
-class Integrator {
+class TimeIntegrator 
+{
 public:
-    Integrator();
+    TimeIntegrator();
 
-    /// Initialize with a scene
-    void initialize(Scene& scene);
+    void prepare(World& world);
+    void advance(World& world);
 
-    /// Advance the simulation by one time step
-    void step(Scene& scene);
+    void setIterationLimit(IntType limit) { m_iterLimit = limit; }
+    void setConvergenceThreshold(RealType thresh) { m_convergenceThresh = thresh; }
+    void setDeltaTime(RealType dt) { m_deltaTime = dt; }
 
-    // Configuration
-    void setMaxIterations(Int iter) { maxIterations_ = iter; }
-    void setTolerance(Float tol) { tolerance_ = tol; }
-    void setTimeStep(Float dt) { timeStep_ = dt; }
+    [[nodiscard]] IntType iterationLimit() const { return m_iterLimit; }
+    [[nodiscard]] RealType convergenceThreshold() const { return m_convergenceThresh; }
+    [[nodiscard]] RealType deltaTime() const { return m_deltaTime; }
 
-    [[nodiscard]] Int maxIterations() const { return maxIterations_; }
-    [[nodiscard]] Float tolerance() const { return tolerance_; }
-    [[nodiscard]] Float timeStep() const { return timeStep_; }
-
-    /// Get the collision detector
-    [[nodiscard]] CollisionDetector& collisionDetector() { return collisionDetector_; }
-    [[nodiscard]] const CollisionDetector& collisionDetector() const { return collisionDetector_; }
+    [[nodiscard]] CollisionSystem& collisionSystem() { return m_collisionSystem; }
+    [[nodiscard]] const CollisionSystem& collisionSystem() const { return m_collisionSystem; }
 
 private:
-    void buildMassMatrix(Scene& scene, SparseMat& M);
-    void updateBodyStates(Scene& scene, const VecX& deltaV);
-    bool solve(const SparseMat& A, const VecX& b, VecX& x);
+    void assembleMassMatrix(World& world, SparseGrid& M);
+    void applyVelocityUpdates(World& world, const VectorN& deltaV);
+    bool solveLinearSystem(const SparseGrid& A, const VectorN& b, VectorN& x);
 
-    CollisionDetector collisionDetector_;
-    ForceBuilder forceBuilder_;
+    CollisionSystem m_collisionSystem;
+    ForceAssembler m_forceAssembler;
 
-    SparseMat massMatrix_;
-    SparseMat jacobian_;
-    SparseMat systemMatrix_;
-    VecX forceVector_;
-    VecX deltaV_;
-    VecX rhs_;
+    SparseGrid m_massMatrix;
+    SparseGrid m_stiffnessMatrix;
+    SparseGrid m_systemMatrix;
+    VectorN m_forceVector;
+    VectorN m_velocityDelta;
+    VectorN m_rightHandSide;
 
-    Int   maxIterations_;
-    Float tolerance_;
-    Float timeStep_;
+    IntType  m_iterLimit;
+    RealType m_convergenceThresh;
+    RealType m_deltaTime;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using Integrator = phys3d::TimeIntegrator;
+}
+
+#endif // PHYS3D_TIME_INTEGRATOR_HPP

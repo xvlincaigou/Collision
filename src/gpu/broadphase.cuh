@@ -1,62 +1,67 @@
-/**
- * @file broadphase.cuh
- * @brief GPU-accelerated broadphase collision detection.
+/*
+ * GPU-Accelerated Broad Phase Collision Detection
  */
-#pragma once
+#ifndef PHYS3D_DEVICE_BROADPHASE_CUH
+#define PHYS3D_DEVICE_BROADPHASE_CUH
 
 #include <cuda_runtime.h>
 #include <vector>
 
 #include "core/common.h"
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-/// AABB endpoint for sweep-and-prune
-struct AABBEndpoint {
-    float value;
-    int bodyId;
-    int isMax;  // 0 = min, 1 = max
+struct BoundsEndpoint 
+{
+    float coord;
+    int entityId;
+    int isUpperBound;
 };
 
-/// Collision pair result
-struct CollisionPair {
-    int bodyA;
-    int bodyB;
+struct EntityPair 
+{
+    int entityA;
+    int entityB;
 };
 
-/**
- * @class BroadphaseGPU
- * @brief Sweep-and-prune broadphase using CUDA.
- */
-class BroadphaseGPU {
+class BroadPhaseDetector 
+{
 public:
-    BroadphaseGPU();
-    ~BroadphaseGPU();
+    BroadPhaseDetector();
+    ~BroadPhaseDetector();
 
-    /// Detect potentially colliding pairs
-    void detectPairs(const Vector<Vec3>& aabbMins,
-                     const Vector<Vec3>& aabbMaxs,
-                     Vector<CollisionPair>& outPairs);
+    void findCandidatePairs(const DynArray<Point3>& boundsMin,
+                            const DynArray<Point3>& boundsMax,
+                            DynArray<EntityPair>& resultPairs);
 
-    /// Free GPU resources
-    void free();
+    void release();
 
 private:
-    void ensureCapacity(int numBodies);
+    void ensureBufferCapacity(int entityCount);
 
-    AABBEndpoint* dEndpoints_ = nullptr;
-    int* dSortedIndices_      = nullptr;
-    int* dActiveList_         = nullptr;
-    CollisionPair* dPairs_    = nullptr;
-    int* dPairCount_          = nullptr;
+    BoundsEndpoint* m_dEndpoints  = nullptr;
+    int* m_dSortedIdx             = nullptr;
+    int* m_dActiveSet             = nullptr;
+    EntityPair* m_dPairs          = nullptr;
+    int* m_dPairCounter           = nullptr;
 
-    float* dAabbMins_         = nullptr;
-    float* dAabbMaxs_         = nullptr;
+    float* m_dBoundsMin           = nullptr;
+    float* m_dBoundsMax           = nullptr;
 
-    int capacity_  = 0;
-    int maxPairs_  = 0;
+    int m_bufferCapacity  = 0;
+    int m_maxPairCount    = 0;
 };
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+namespace gpu {
+    using BroadphaseGPU = phys3d::gpu::BroadPhaseDetector;
+    using AABBEndpoint = phys3d::gpu::BoundsEndpoint;
+    using CollisionPair = phys3d::gpu::EntityPair;
+}
+}
+
+#endif // PHYS3D_DEVICE_BROADPHASE_CUH

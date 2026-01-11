@@ -1,43 +1,38 @@
-/**
- * @file environment.cpp
- * @brief Implementation of the Environment class.
+/*
+ * Implementation: Boundaries class
  */
 #include "environment.h"
 
-namespace rigid {
+namespace phys3d {
 
-Environment::Environment() {
-    // Default bounds: 20x20x20 box centered at origin
-    setBounds(Vec3(-10.0f, -10.0f, -10.0f), Vec3(10.0f, 10.0f, 10.0f));
+Boundaries::Boundaries() 
+{
+    defineBounds(Point3(static_cast<RealType>(-10), static_cast<RealType>(-10), static_cast<RealType>(-10)),
+                 Point3(static_cast<RealType>(10), static_cast<RealType>(10), static_cast<RealType>(10)));
 }
 
-void Environment::setBounds(const Vec3& minCorner, const Vec3& maxCorner) {
-    minCorner_ = minCorner;
-    maxCorner_ = maxCorner;
+void Boundaries::defineBounds(const Point3& lowerCorner, const Point3& upperCorner) 
+{
+    m_lowerCorner = lowerCorner;
+    m_upperCorner = upperCorner;
 
-    // Negative X boundary: normal points +X, pushes objects right
-    planes_[kNegX].normal = Vec3(1.0f, 0.0f, 0.0f);
-    planes_[kNegX].offset = minCorner.x();
+    m_planes[kMinX].direction = Point3(static_cast<RealType>(1), static_cast<RealType>(0), static_cast<RealType>(0));
+    m_planes[kMinX].distance = lowerCorner.x();
 
-    // Positive X boundary: normal points -X, pushes objects left
-    planes_[kPosX].normal = Vec3(-1.0f, 0.0f, 0.0f);
-    planes_[kPosX].offset = -maxCorner.x();
+    m_planes[kMaxX].direction = Point3(static_cast<RealType>(-1), static_cast<RealType>(0), static_cast<RealType>(0));
+    m_planes[kMaxX].distance = -upperCorner.x();
 
-    // Negative Y boundary
-    planes_[kNegY].normal = Vec3(0.0f, 1.0f, 0.0f);
-    planes_[kNegY].offset = minCorner.y();
+    m_planes[kMinY].direction = Point3(static_cast<RealType>(0), static_cast<RealType>(1), static_cast<RealType>(0));
+    m_planes[kMinY].distance = lowerCorner.y();
 
-    // Positive Y boundary
-    planes_[kPosY].normal = Vec3(0.0f, -1.0f, 0.0f);
-    planes_[kPosY].offset = -maxCorner.y();
+    m_planes[kMaxY].direction = Point3(static_cast<RealType>(0), static_cast<RealType>(-1), static_cast<RealType>(0));
+    m_planes[kMaxY].distance = -upperCorner.y();
 
-    // Negative Z boundary (floor)
-    planes_[kNegZ].normal = Vec3(0.0f, 0.0f, 1.0f);
-    planes_[kNegZ].offset = minCorner.z();
+    m_planes[kMinZ].direction = Point3(static_cast<RealType>(0), static_cast<RealType>(0), static_cast<RealType>(1));
+    m_planes[kMinZ].distance = lowerCorner.z();
 
-    // Positive Z boundary (ceiling)
-    planes_[kPosZ].normal = Vec3(0.0f, 0.0f, -1.0f);
-    planes_[kPosZ].offset = -maxCorner.z();
+    m_planes[kMaxZ].direction = Point3(static_cast<RealType>(0), static_cast<RealType>(0), static_cast<RealType>(-1));
+    m_planes[kMaxZ].distance = -upperCorner.z();
 }
 
-}  // namespace rigid
+}  // namespace phys3d

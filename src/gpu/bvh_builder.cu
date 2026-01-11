@@ -1,6 +1,5 @@
-/**
- * @file bvh_builder.cu
- * @brief CUDA implementation of GPU BVH construction.
+/*
+ * Implementation: CUDA Spatial Tree Builder
  */
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
@@ -10,353 +9,359 @@
 
 #include "bvh_builder.cuh"
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-// ============================================================================
-// CUDA Kernels
-// ============================================================================
+/* ========== Kernel Implementations ========== */
 
-__global__ void computeCentroidsBoundsKernel(
-    const Float3* vertices,
-    const Int3* triangles,
-    Float3* centroids,
-    AABBDevice* primBounds,
-    Float3* sceneMin,
-    Float3* sceneMax,
-    int n)
+__global__ void kernelComputeCentersAndBounds(
+    const CudaFloat3* pointData,
+    const CudaInt3* faceData,
+    CudaFloat3* centerData,
+    DeviceBounds3D* primBoundsData,
+    CudaFloat3* globalMin,
+    CudaFloat3* globalMax,
+    int faceTotal)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= faceTotal) return;
 
-    Int3 tri = triangles[idx];
-    Float3 v0 = vertices[tri.x];
-    Float3 v1 = vertices[tri.y];
-    Float3 v2 = vertices[tri.z];
+    CudaInt3 face = faceData[tid];
+    CudaFloat3 pt0 = pointData[face.x];
+    CudaFloat3 pt1 = pointData[face.y];
+    CudaFloat3 pt2 = pointData[face.z];
 
-    centroids[idx] = make_float3(
-        (v0.x + v1.x + v2.x) / 3.0f,
-        (v0.y + v1.y + v2.y) / 3.0f,
-        (v0.z + v1.z + v2.z) / 3.0f);
+    centerData[tid] = make_float3(
+        (pt0.x + pt1.x + pt2.x) / 3.0f,
+        (pt0.y + pt1.y + pt2.y) / 3.0f,
+        (pt0.z + pt1.z + pt2.z) / 3.0f);
 
-    AABBDevice bounds;
-    bounds.min = make_float3(
-        fminf(fminf(v0.x, v1.x), v2.x),
-        fminf(fminf(v0.y, v1.y), v2.y),
-        fminf(fminf(v0.z, v1.z), v2.z));
-    bounds.max = make_float3(
-        fmaxf(fmaxf(v0.x, v1.x), v2.x),
-        fmaxf(fmaxf(v0.y, v1.y), v2.y),
-        fmaxf(fmaxf(v0.z, v1.z), v2.z));
-    primBounds[idx] = bounds;
+    DeviceBounds3D bounds;
+    bounds.lo = make_float3(
+        fminf(fminf(pt0.x, pt1.x), pt2.x),
+        fminf(fminf(pt0.y, pt1.y), pt2.y),
+        fminf(fminf(pt0.z, pt1.z), pt2.z));
+    bounds.hi = make_float3(
+        fmaxf(fmaxf(pt0.x, pt1.x), pt2.x),
+        fmaxf(fmaxf(pt0.y, pt1.y), pt2.y),
+        fmaxf(fmaxf(pt0.z, pt1.z), pt2.z));
+    primBoundsData[tid] = bounds;
 
-    atomicMin(reinterpret_cast<int*>(&sceneMin->x), __float_as_int(bounds.min.x));
-    atomicMin(reinterpret_cast<int*>(&sceneMin->y), __float_as_int(bounds.min.y));
-    atomicMin(reinterpret_cast<int*>(&sceneMin->z), __float_as_int(bounds.min.z));
-    atomicMax(reinterpret_cast<int*>(&sceneMax->x), __float_as_int(bounds.max.x));
-    atomicMax(reinterpret_cast<int*>(&sceneMax->y), __float_as_int(bounds.max.y));
-    atomicMax(reinterpret_cast<int*>(&sceneMax->z), __float_as_int(bounds.max.z));
+    atomicMin(reinterpret_cast<int*>(&globalMin->x), __float_as_int(bounds.lo.x));
+    atomicMin(reinterpret_cast<int*>(&globalMin->y), __float_as_int(bounds.lo.y));
+    atomicMin(reinterpret_cast<int*>(&globalMin->z), __float_as_int(bounds.lo.z));
+    atomicMax(reinterpret_cast<int*>(&globalMax->x), __float_as_int(bounds.hi.x));
+    atomicMax(reinterpret_cast<int*>(&globalMax->y), __float_as_int(bounds.hi.y));
+    atomicMax(reinterpret_cast<int*>(&globalMax->z), __float_as_int(bounds.hi.z));
 }
 
-__global__ void computeMortonCodesKernel(
-    const Float3* centroids,
-    UInt* mortonCodes,
-    Float3 sceneMin,
-    Float3 sceneExtent,
-    int n)
+__global__ void kernelEncodeMorton(
+    const CudaFloat3* centerData,
+    UIntType* mortonData,
+    CudaFloat3 rangeMin,
+    CudaFloat3 rangeSpan,
+    int faceTotal)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= faceTotal) return;
 
-    Float3 c = centroids[idx];
+    CudaFloat3 c = centerData[tid];
 
-    float nx = (sceneExtent.x > 0) ? (c.x - sceneMin.x) / sceneExtent.x : 0.5f;
-    float ny = (sceneExtent.y > 0) ? (c.y - sceneMin.y) / sceneExtent.y : 0.5f;
-    float nz = (sceneExtent.z > 0) ? (c.z - sceneMin.z) / sceneExtent.z : 0.5f;
+    float normX = (rangeSpan.x > 0) ? (c.x - rangeMin.x) / rangeSpan.x : 0.5f;
+    float normY = (rangeSpan.y > 0) ? (c.y - rangeMin.y) / rangeSpan.y : 0.5f;
+    float normZ = (rangeSpan.z > 0) ? (c.z - rangeMin.z) / rangeSpan.z : 0.5f;
 
-    mortonCodes[idx] = computeMortonCode3D(nx, ny, nz);
+    mortonData[tid] = encodeMorton(normX, normY, normZ);
 }
 
-__global__ void buildRadixTreeKernel(
-    const UInt* sortedMortonCodes,
-    const int* sortedIndices,
-    BVHNodeDevice* nodes,
-    int* parentIndices,
-    int* primIndices,
-    int n)
+__global__ void kernelBuildRadixTree(
+    const UIntType* sortedMorton,
+    const int* sortedIdx,
+    DeviceTreeNode* nodeData,
+    int* parentData,
+    int* faceOrderData,
+    int faceTotal)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n - 1) return;
+    if (i >= faceTotal - 1) return;
 
-    int dLeft = delta(sortedMortonCodes, n, i, i - 1);
-    int dRight = delta(sortedMortonCodes, n, i, i + 1);
-    int d = (dRight > dLeft) ? 1 : -1;
+    int prefixLeft = commonPrefix(sortedMorton, faceTotal, i, i - 1);
+    int prefixRight = commonPrefix(sortedMorton, faceTotal, i, i + 1);
+    int dir = (prefixRight > prefixLeft) ? 1 : -1;
 
-    int deltaMin = delta(sortedMortonCodes, n, i, i - d);
-    int lMax = 2;
-    while (delta(sortedMortonCodes, n, i, i + lMax * d) > deltaMin)
-        lMax *= 2;
+    int minPrefix = commonPrefix(sortedMorton, faceTotal, i, i - dir);
+    int maxLen = 2;
+    while (commonPrefix(sortedMorton, faceTotal, i, i + maxLen * dir) > minPrefix)
+        maxLen *= 2;
 
-    int l = 0;
-    for (int t = lMax / 2; t >= 1; t /= 2)
-        if (delta(sortedMortonCodes, n, i, i + (l + t) * d) > deltaMin)
-            l = l + t;
-    int j = i + l * d;
+    int len = 0;
+    for (int step = maxLen / 2; step >= 1; step /= 2)
+        if (commonPrefix(sortedMorton, faceTotal, i, i + (len + step) * dir) > minPrefix)
+            len = len + step;
+    int j = i + len * dir;
 
-    int deltaNode = delta(sortedMortonCodes, n, i, j);
-    int s = 0;
-    int div = 2;
-    int t = (l + div - 1) / div;
-    while (t >= 1) {
-        if (delta(sortedMortonCodes, n, i, i + (s + t) * d) > deltaNode)
-            s = s + t;
-        div *= 2;
-        t = (l + div - 1) / div;
+    int nodePrefix = commonPrefix(sortedMorton, faceTotal, i, j);
+    int splitPos = 0;
+    int divisor = 2;
+    int t = (len + divisor - 1) / divisor;
+    while (t >= 1) 
+    {
+        if (commonPrefix(sortedMorton, faceTotal, i, i + (splitPos + t) * dir) > nodePrefix)
+            splitPos = splitPos + t;
+        divisor *= 2;
+        t = (len + divisor - 1) / divisor;
     }
-    int gamma = i + s * d + min(d, 0);
+    int gamma = i + splitPos * dir + min(dir, 0);
 
-    int leftIdx, rightIdx;
-    int rangeLeft = min(i, j);
-    int rangeRight = max(i, j);
+    int leftChild, rightChild;
+    int rangeMin = min(i, j);
+    int rangeMax = max(i, j);
 
-    if (rangeLeft == gamma) {
-        leftIdx = n - 1 + gamma;
-        nodes[leftIdx].firstPrim = gamma;
-        nodes[leftIdx].primCount = 1;
-        nodes[leftIdx].left = -1;
-        nodes[leftIdx].right = -1;
-        primIndices[gamma] = sortedIndices[gamma];
-        parentIndices[leftIdx] = i;
-    } else {
-        leftIdx = gamma;
-        parentIndices[gamma] = i;
-    }
-
-    if (rangeRight == gamma + 1) {
-        rightIdx = n - 1 + gamma + 1;
-        nodes[rightIdx].firstPrim = gamma + 1;
-        nodes[rightIdx].primCount = 1;
-        nodes[rightIdx].left = -1;
-        nodes[rightIdx].right = -1;
-        primIndices[gamma + 1] = sortedIndices[gamma + 1];
-        parentIndices[rightIdx] = i;
-    } else {
-        rightIdx = gamma + 1;
-        parentIndices[gamma + 1] = i;
+    if (rangeMin == gamma) 
+    {
+        leftChild = faceTotal - 1 + gamma;
+        nodeData[leftChild].leafStart = gamma;
+        nodeData[leftChild].leafCount = 1;
+        nodeData[leftChild].leftChild = -1;
+        nodeData[leftChild].rightChild = -1;
+        faceOrderData[gamma] = sortedIdx[gamma];
+        parentData[leftChild] = i;
+    } 
+    else 
+    {
+        leftChild = gamma;
+        parentData[gamma] = i;
     }
 
-    nodes[i].left = leftIdx;
-    nodes[i].right = rightIdx;
-    nodes[i].firstPrim = -1;
-    nodes[i].primCount = 0;
+    if (rangeMax == gamma + 1) 
+    {
+        rightChild = faceTotal - 1 + gamma + 1;
+        nodeData[rightChild].leafStart = gamma + 1;
+        nodeData[rightChild].leafCount = 1;
+        nodeData[rightChild].leftChild = -1;
+        nodeData[rightChild].rightChild = -1;
+        faceOrderData[gamma + 1] = sortedIdx[gamma + 1];
+        parentData[rightChild] = i;
+    } 
+    else 
+    {
+        rightChild = gamma + 1;
+        parentData[gamma + 1] = i;
+    }
+
+    nodeData[i].leftChild = leftChild;
+    nodeData[i].rightChild = rightChild;
+    nodeData[i].leafStart = -1;
+    nodeData[i].leafCount = 0;
 }
 
-__global__ void computeNodeBoundsKernel(
-    BVHNodeDevice* nodes,
-    const int* parentIndices,
-    int* atomicCounters,
-    const AABBDevice* primBounds,
-    const int* primIndices,
-    int n)
+__global__ void kernelPropagateBounds(
+    DeviceTreeNode* nodeData,
+    const int* parentData,
+    int* visitFlags,
+    const DeviceBounds3D* primBoundsData,
+    const int* faceOrderData,
+    int faceTotal)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= faceTotal) return;
 
-    int leafIdx = n - 1 + idx;
-    int primIdx = primIndices[idx];
-    nodes[leafIdx].bounds = primBounds[primIdx];
+    int leafIdx = faceTotal - 1 + tid;
+    int primIdx = faceOrderData[tid];
+    nodeData[leafIdx].volume = primBoundsData[primIdx];
 
-    int current = parentIndices[leafIdx];
-    while (current >= 0) {
-        int old = atomicAdd(&atomicCounters[current], 1);
-        if (old == 0) return;  // Wait for sibling
+    int current = parentData[leafIdx];
+    while (current >= 0) 
+    {
+        int prevCount = atomicAdd(&visitFlags[current], 1);
+        if (prevCount == 0) return;
 
-        int left = nodes[current].left;
-        int right = nodes[current].right;
-        AABBDevice leftBounds = nodes[left].bounds;
-        AABBDevice rightBounds = nodes[right].bounds;
+        int lc = nodeData[current].leftChild;
+        int rc = nodeData[current].rightChild;
+        DeviceBounds3D leftVol = nodeData[lc].volume;
+        DeviceBounds3D rightVol = nodeData[rc].volume;
 
-        nodes[current].bounds.min = make_float3(
-            fminf(leftBounds.min.x, rightBounds.min.x),
-            fminf(leftBounds.min.y, rightBounds.min.y),
-            fminf(leftBounds.min.z, rightBounds.min.z));
-        nodes[current].bounds.max = make_float3(
-            fmaxf(leftBounds.max.x, rightBounds.max.x),
-            fmaxf(leftBounds.max.y, rightBounds.max.y),
-            fmaxf(leftBounds.max.z, rightBounds.max.z));
+        nodeData[current].volume.lo = make_float3(
+            fminf(leftVol.lo.x, rightVol.lo.x),
+            fminf(leftVol.lo.y, rightVol.lo.y),
+            fminf(leftVol.lo.z, rightVol.lo.z));
+        nodeData[current].volume.hi = make_float3(
+            fmaxf(leftVol.hi.x, rightVol.hi.x),
+            fmaxf(leftVol.hi.y, rightVol.hi.y),
+            fmaxf(leftVol.hi.z, rightVol.hi.z));
 
-        current = parentIndices[current];
+        current = parentData[current];
     }
 }
 
-// ============================================================================
-// BVHBuilderGPU Implementation
-// ============================================================================
+/* ========== DeviceTreeBuilder Implementation ========== */
 
-BVHBuilderGPU::BVHBuilderGPU() = default;
+DeviceTreeBuilder::DeviceTreeBuilder() = default;
 
-BVHBuilderGPU::~BVHBuilderGPU() {
-    free();
+DeviceTreeBuilder::~DeviceTreeBuilder() 
+{
+    release();
 }
 
-void BVHBuilderGPU::free() {
-    if (dVertices_) cudaFree(dVertices_);
-    if (dTriangles_) cudaFree(dTriangles_);
-    if (dCentroids_) cudaFree(dCentroids_);
-    if (dPrimBounds_) cudaFree(dPrimBounds_);
-    if (dMortonCodes_) cudaFree(dMortonCodes_);
-    if (dSortedIndices_) cudaFree(dSortedIndices_);
-    if (dPrimIndices_) cudaFree(dPrimIndices_);
-    if (dNodes_) cudaFree(dNodes_);
-    if (dParentIndices_) cudaFree(dParentIndices_);
-    if (dAtomicCounters_) cudaFree(dAtomicCounters_);
+void DeviceTreeBuilder::release() 
+{
+    if (m_dPoints) cudaFree(m_dPoints);
+    if (m_dFaces) cudaFree(m_dFaces);
+    if (m_dCenters) cudaFree(m_dCenters);
+    if (m_dPrimBounds) cudaFree(m_dPrimBounds);
+    if (m_dMortonCodes) cudaFree(m_dMortonCodes);
+    if (m_dSortedIdx) cudaFree(m_dSortedIdx);
+    if (m_dFaceOrder) cudaFree(m_dFaceOrder);
+    if (m_dNodes) cudaFree(m_dNodes);
+    if (m_dParentIdx) cudaFree(m_dParentIdx);
+    if (m_dAtomicFlags) cudaFree(m_dAtomicFlags);
 
-    dVertices_ = nullptr;
-    dTriangles_ = nullptr;
-    dCentroids_ = nullptr;
-    dPrimBounds_ = nullptr;
-    dMortonCodes_ = nullptr;
-    dSortedIndices_ = nullptr;
-    dPrimIndices_ = nullptr;
-    dNodes_ = nullptr;
-    dParentIndices_ = nullptr;
-    dAtomicCounters_ = nullptr;
+    m_dPoints = nullptr;
+    m_dFaces = nullptr;
+    m_dCenters = nullptr;
+    m_dPrimBounds = nullptr;
+    m_dMortonCodes = nullptr;
+    m_dSortedIdx = nullptr;
+    m_dFaceOrder = nullptr;
+    m_dNodes = nullptr;
+    m_dParentIdx = nullptr;
+    m_dAtomicFlags = nullptr;
 }
 
-void BVHBuilderGPU::build(const Vector<Vec3>& vertices,
-                          const Vector<Triangle>& triangles) {
-    free();
+void DeviceTreeBuilder::execute(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces) 
+{
+    release();
 
-    numVertices_ = static_cast<Int>(vertices.size());
-    numTriangles_ = static_cast<Int>(triangles.size());
-    numInternalNodes_ = numTriangles_ - 1;
-    numNodes_ = numTriangles_ + numInternalNodes_;
+    m_pointCount = static_cast<IntType>(pointCloud.size());
+    m_faceCount = static_cast<IntType>(faces.size());
+    m_internalCount = m_faceCount - 1;
+    m_totalNodes = m_faceCount + m_internalCount;
 
-    if (numTriangles_ == 0) return;
+    if (m_faceCount == 0) return;
 
-    // Allocate device memory
-    cudaMalloc(&dVertices_, numVertices_ * sizeof(Float3));
-    cudaMalloc(&dTriangles_, numTriangles_ * sizeof(Int3));
-    cudaMalloc(&dCentroids_, numTriangles_ * sizeof(Float3));
-    cudaMalloc(&dPrimBounds_, numTriangles_ * sizeof(AABBDevice));
-    cudaMalloc(&dMortonCodes_, numTriangles_ * sizeof(UInt));
-    cudaMalloc(&dSortedIndices_, numTriangles_ * sizeof(int));
-    cudaMalloc(&dPrimIndices_, numTriangles_ * sizeof(int));
-    cudaMalloc(&dNodes_, numNodes_ * sizeof(BVHNodeDevice));
-    cudaMalloc(&dParentIndices_, numNodes_ * sizeof(int));
-    cudaMalloc(&dAtomicCounters_, numInternalNodes_ * sizeof(int));
+    cudaMalloc(&m_dPoints, m_pointCount * sizeof(CudaFloat3));
+    cudaMalloc(&m_dFaces, m_faceCount * sizeof(CudaInt3));
+    cudaMalloc(&m_dCenters, m_faceCount * sizeof(CudaFloat3));
+    cudaMalloc(&m_dPrimBounds, m_faceCount * sizeof(DeviceBounds3D));
+    cudaMalloc(&m_dMortonCodes, m_faceCount * sizeof(UIntType));
+    cudaMalloc(&m_dSortedIdx, m_faceCount * sizeof(int));
+    cudaMalloc(&m_dFaceOrder, m_faceCount * sizeof(int));
+    cudaMalloc(&m_dNodes, m_totalNodes * sizeof(DeviceTreeNode));
+    cudaMalloc(&m_dParentIdx, m_totalNodes * sizeof(int));
+    cudaMalloc(&m_dAtomicFlags, m_internalCount * sizeof(int));
 
-    // Copy vertices to GPU
-    std::vector<Float3> hVertices(numVertices_);
-    for (int i = 0; i < numVertices_; ++i) {
-        hVertices[i] = make_float3(vertices[i].x(), vertices[i].y(), vertices[i].z());
+    std::vector<CudaFloat3> hostPoints(m_pointCount);
+    for (int i = 0; i < m_pointCount; ++i) 
+    {
+        hostPoints[i] = make_float3(pointCloud[i].x(), pointCloud[i].y(), pointCloud[i].z());
     }
-    cudaMemcpy(dVertices_, hVertices.data(), numVertices_ * sizeof(Float3),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(m_dPoints, hostPoints.data(), m_pointCount * sizeof(CudaFloat3), cudaMemcpyHostToDevice);
 
-    // Copy triangles to GPU
-    std::vector<Int3> hTriangles(numTriangles_);
-    for (int i = 0; i < numTriangles_; ++i) {
-        hTriangles[i] = make_int3(triangles[i].x(), triangles[i].y(), triangles[i].z());
+    std::vector<CudaInt3> hostFaces(m_faceCount);
+    for (int i = 0; i < m_faceCount; ++i) 
+    {
+        hostFaces[i] = make_int3(faces[i].x(), faces[i].y(), faces[i].z());
     }
-    cudaMemcpy(dTriangles_, hTriangles.data(), numTriangles_ * sizeof(Int3),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(m_dFaces, hostFaces.data(), m_faceCount * sizeof(CudaInt3), cudaMemcpyHostToDevice);
 
-    cudaMemset(dAtomicCounters_, 0, numInternalNodes_ * sizeof(int));
-    cudaMemset(dParentIndices_, -1, numNodes_ * sizeof(int));
+    cudaMemset(m_dAtomicFlags, 0, m_internalCount * sizeof(int));
+    cudaMemset(m_dParentIdx, -1, m_totalNodes * sizeof(int));
 
-    computeCentroidsBounds();
+    computePrimitiveBounds();
     computeMortonCodes();
-    sortMortonCodes();
-    buildRadixTree();
-    computeNodeBounds();
+    sortByMorton();
+    constructRadixTree();
+    propagateBounds();
 
     cudaDeviceSynchronize();
 }
 
-void BVHBuilderGPU::computeCentroidsBounds() {
-    Float3* dSceneMin;
-    Float3* dSceneMax;
-    cudaMalloc(&dSceneMin, sizeof(Float3));
-    cudaMalloc(&dSceneMax, sizeof(Float3));
+void DeviceTreeBuilder::computePrimitiveBounds() 
+{
+    CudaFloat3* dGlobalMin;
+    CudaFloat3* dGlobalMax;
+    cudaMalloc(&dGlobalMin, sizeof(CudaFloat3));
+    cudaMalloc(&dGlobalMax, sizeof(CudaFloat3));
 
-    Float3 initMin = make_float3(1e30f, 1e30f, 1e30f);
-    Float3 initMax = make_float3(-1e30f, -1e30f, -1e30f);
-    cudaMemcpy(dSceneMin, &initMin, sizeof(Float3), cudaMemcpyHostToDevice);
-    cudaMemcpy(dSceneMax, &initMax, sizeof(Float3), cudaMemcpyHostToDevice);
+    CudaFloat3 initMin = make_float3(1e30f, 1e30f, 1e30f);
+    CudaFloat3 initMax = make_float3(-1e30f, -1e30f, -1e30f);
+    cudaMemcpy(dGlobalMin, &initMin, sizeof(CudaFloat3), cudaMemcpyHostToDevice);
+    cudaMemcpy(dGlobalMax, &initMax, sizeof(CudaFloat3), cudaMemcpyHostToDevice);
 
-    int blockSize = 256;
-    int numBlocks = (numTriangles_ + blockSize - 1) / blockSize;
+    int threadsPerBlock = 256;
+    int numBlocks = (m_faceCount + threadsPerBlock - 1) / threadsPerBlock;
 
-    computeCentroidsBoundsKernel<<<numBlocks, blockSize>>>(
-        dVertices_, dTriangles_, dCentroids_, dPrimBounds_,
-        dSceneMin, dSceneMax, numTriangles_);
+    kernelComputeCentersAndBounds<<<numBlocks, threadsPerBlock>>>(
+        m_dPoints, m_dFaces, m_dCenters, m_dPrimBounds,
+        dGlobalMin, dGlobalMax, m_faceCount);
 
-    cudaFree(dSceneMin);
-    cudaFree(dSceneMax);
+    cudaFree(dGlobalMin);
+    cudaFree(dGlobalMax);
 }
 
-void BVHBuilderGPU::computeMortonCodes() {
-    std::vector<Float3> hCentroids(numTriangles_);
-    cudaMemcpy(hCentroids.data(), dCentroids_, numTriangles_ * sizeof(Float3),
-               cudaMemcpyDeviceToHost);
+void DeviceTreeBuilder::computeMortonCodes() 
+{
+    std::vector<CudaFloat3> hostCenters(m_faceCount);
+    cudaMemcpy(hostCenters.data(), m_dCenters, m_faceCount * sizeof(CudaFloat3), cudaMemcpyDeviceToHost);
 
-    Float3 sceneMin = make_float3(1e30f, 1e30f, 1e30f);
-    Float3 sceneMax = make_float3(-1e30f, -1e30f, -1e30f);
-    for (const auto& c : hCentroids) {
-        sceneMin.x = fminf(sceneMin.x, c.x);
-        sceneMin.y = fminf(sceneMin.y, c.y);
-        sceneMin.z = fminf(sceneMin.z, c.z);
-        sceneMax.x = fmaxf(sceneMax.x, c.x);
-        sceneMax.y = fmaxf(sceneMax.y, c.y);
-        sceneMax.z = fmaxf(sceneMax.z, c.z);
+    CudaFloat3 rangeMin = make_float3(1e30f, 1e30f, 1e30f);
+    CudaFloat3 rangeMax = make_float3(-1e30f, -1e30f, -1e30f);
+    for (const auto& c : hostCenters) 
+    {
+        rangeMin.x = fminf(rangeMin.x, c.x);
+        rangeMin.y = fminf(rangeMin.y, c.y);
+        rangeMin.z = fminf(rangeMin.z, c.z);
+        rangeMax.x = fmaxf(rangeMax.x, c.x);
+        rangeMax.y = fmaxf(rangeMax.y, c.y);
+        rangeMax.z = fmaxf(rangeMax.z, c.z);
     }
-    Float3 sceneExtent = make_float3(
-        sceneMax.x - sceneMin.x,
-        sceneMax.y - sceneMin.y,
-        sceneMax.z - sceneMin.z);
+    CudaFloat3 rangeSpan = make_float3(
+        rangeMax.x - rangeMin.x,
+        rangeMax.y - rangeMin.y,
+        rangeMax.z - rangeMin.z);
 
-    int blockSize = 256;
-    int numBlocks = (numTriangles_ + blockSize - 1) / blockSize;
+    int threadsPerBlock = 256;
+    int numBlocks = (m_faceCount + threadsPerBlock - 1) / threadsPerBlock;
 
-    computeMortonCodesKernel<<<numBlocks, blockSize>>>(
-        dCentroids_, dMortonCodes_, sceneMin, sceneExtent, numTriangles_);
+    kernelEncodeMorton<<<numBlocks, threadsPerBlock>>>(
+        m_dCenters, m_dMortonCodes, rangeMin, rangeSpan, m_faceCount);
 }
 
-void BVHBuilderGPU::sortMortonCodes() {
-    thrust::device_ptr<UInt> mortonPtr(dMortonCodes_);
-    thrust::device_ptr<int> indicesPtr(dSortedIndices_);
-    thrust::sequence(indicesPtr, indicesPtr + numTriangles_);
-    thrust::sort_by_key(mortonPtr, mortonPtr + numTriangles_, indicesPtr);
+void DeviceTreeBuilder::sortByMorton() 
+{
+    thrust::device_ptr<UIntType> mortonPtr(m_dMortonCodes);
+    thrust::device_ptr<int> idxPtr(m_dSortedIdx);
+    thrust::sequence(idxPtr, idxPtr + m_faceCount);
+    thrust::sort_by_key(mortonPtr, mortonPtr + m_faceCount, idxPtr);
 }
 
-void BVHBuilderGPU::buildRadixTree() {
-    int blockSize = 256;
-    int numBlocks = (numInternalNodes_ + blockSize - 1) / blockSize;
+void DeviceTreeBuilder::constructRadixTree() 
+{
+    int threadsPerBlock = 256;
+    int numBlocks = (m_internalCount + threadsPerBlock - 1) / threadsPerBlock;
 
-    buildRadixTreeKernel<<<numBlocks, blockSize>>>(
-        dMortonCodes_, dSortedIndices_, dNodes_, dParentIndices_,
-        dPrimIndices_, numTriangles_);
+    kernelBuildRadixTree<<<numBlocks, threadsPerBlock>>>(
+        m_dMortonCodes, m_dSortedIdx, m_dNodes, m_dParentIdx,
+        m_dFaceOrder, m_faceCount);
 }
 
-void BVHBuilderGPU::computeNodeBounds() {
-    int blockSize = 256;
-    int numBlocks = (numTriangles_ + blockSize - 1) / blockSize;
+void DeviceTreeBuilder::propagateBounds() 
+{
+    int threadsPerBlock = 256;
+    int numBlocks = (m_faceCount + threadsPerBlock - 1) / threadsPerBlock;
 
-    computeNodeBoundsKernel<<<numBlocks, blockSize>>>(
-        dNodes_, dParentIndices_, dAtomicCounters_,
-        dPrimBounds_, dPrimIndices_, numTriangles_);
+    kernelPropagateBounds<<<numBlocks, threadsPerBlock>>>(
+        m_dNodes, m_dParentIdx, m_dAtomicFlags,
+        m_dPrimBounds, m_dFaceOrder, m_faceCount);
 }
 
-void BVHBuilderGPU::copyToHost(Vector<BVHNodeDevice>& outNodes,
-                               Vector<Int>& outPrimIndices) const {
-    outNodes.resize(numNodes_);
-    outPrimIndices.resize(numTriangles_);
-    cudaMemcpy(outNodes.data(), dNodes_, numNodes_ * sizeof(BVHNodeDevice),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(outPrimIndices.data(), dPrimIndices_, numTriangles_ * sizeof(Int),
-               cudaMemcpyDeviceToHost);
+void DeviceTreeBuilder::transferToHost(DynArray<DeviceTreeNode>& outNodes, DynArray<IntType>& outFaceOrder) const 
+{
+    outNodes.resize(m_totalNodes);
+    outFaceOrder.resize(m_faceCount);
+    cudaMemcpy(outNodes.data(), m_dNodes, m_totalNodes * sizeof(DeviceTreeNode), cudaMemcpyDeviceToHost);
+    cudaMemcpy(outFaceOrder.data(), m_dFaceOrder, m_faceCount * sizeof(IntType), cudaMemcpyDeviceToHost);
 }
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d

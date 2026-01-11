@@ -1,61 +1,56 @@
-/**
- * @file scene.h
- * @brief Scene container for rigid bodies and environment.
+/*
+ * Simulation World Container
  */
-#pragma once
+#ifndef PHYS3D_WORLD_HPP
+#define PHYS3D_WORLD_HPP
 
 #include "core/common.h"
 #include "environment.h"
 #include "physics/rigid_body.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @class Scene
- * @brief Container for all simulation objects.
+/*
+ * World - Contains all simulation objects
  */
-class Scene {
+class World 
+{
 public:
-    Scene() = default;
+    World() = default;
 
-    // ========================================================================
-    // Body Management
-    // ========================================================================
+    /* Entity Management */
+    DynamicEntity& spawnEntity(const TextType& identifier);
 
-    /// Create a new rigid body with the given name
-    RigidBody& createBody(const String& name);
+    [[nodiscard]] DynamicEntity* entity(IntType idx);
+    [[nodiscard]] const DynamicEntity* entity(IntType idx) const;
 
-    /// Get a body by index (returns nullptr if invalid)
-    [[nodiscard]] RigidBody* body(Int index);
-    [[nodiscard]] const RigidBody* body(Int index) const;
+    [[nodiscard]] DynArray<SolePtr<DynamicEntity>>& entities() { return m_entities; }
+    [[nodiscard]] const DynArray<SolePtr<DynamicEntity>>& entities() const { return m_entities; }
 
-    /// Get the list of all bodies
-    [[nodiscard]] Vector<UniquePtr<RigidBody>>& bodies() { return bodies_; }
-    [[nodiscard]] const Vector<UniquePtr<RigidBody>>& bodies() const { return bodies_; }
+    [[nodiscard]] IntType entityCount() const { return static_cast<IntType>(m_entities.size()); }
 
-    /// Get the number of bodies
-    [[nodiscard]] Int bodyCount() const { return static_cast<Int>(bodies_.size()); }
+    void destroyAllEntities() { m_entities.clear(); }
 
-    /// Clear all bodies
-    void clearBodies() { bodies_.clear(); }
+    [[nodiscard]] bool hasNoEntities() const { return m_entities.empty(); }
 
-    /// Check if scene is empty
-    [[nodiscard]] bool isEmpty() const { return bodies_.empty(); }
+    /* Boundaries */
+    [[nodiscard]] Boundaries& boundaries() { return m_boundaries; }
+    [[nodiscard]] const Boundaries& boundaries() const { return m_boundaries; }
 
-    // ========================================================================
-    // Environment
-    // ========================================================================
-
-    [[nodiscard]] Environment& environment() { return environment_; }
-    [[nodiscard]] const Environment& environment() const { return environment_; }
-
-    void setEnvironmentBounds(const Vec3& minCorner, const Vec3& maxCorner) {
-        environment_.setBounds(minCorner, maxCorner);
+    void configureBounds(const Point3& lowerCorner, const Point3& upperCorner) 
+    {
+        m_boundaries.defineBounds(lowerCorner, upperCorner);
     }
 
 private:
-    Vector<UniquePtr<RigidBody>> bodies_;
-    Environment environment_;
+    DynArray<SolePtr<DynamicEntity>> m_entities;
+    Boundaries m_boundaries;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using Scene = phys3d::World;
+}
+
+#endif // PHYS3D_WORLD_HPP

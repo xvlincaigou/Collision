@@ -1,30 +1,37 @@
-/**
- * @file contact.h
- * @brief Contact information for collision detection.
+/*
+ * Contact Information for Collision Response
  */
-#pragma once
+#ifndef PHYS3D_CONTACT_INFO_HPP
+#define PHYS3D_CONTACT_INFO_HPP
 
 #include "core/common.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @struct Contact
- * @brief Represents a collision contact between bodies or body-environment.
+/*
+ * ContactPoint - Stores collision contact data
  */
-struct Contact {
-    Vec3  position;     ///< World-space contact point
-    Vec3  normal;       ///< World-space contact normal (points out of body A)
-    Float depth;        ///< Penetration depth
-    Int   bodyIndexA;   ///< Body A index (-1 for environment)
-    Int   bodyIndexB;   ///< Body B index (the penetrating body)
+struct ContactPoint 
+{
+    Point3   location;
+    Point3   direction;
+    RealType depth;
+    IntType  entityA;
+    IntType  entityB;
 
-    Contact()
-        : position(Vec3::Zero())
-        , normal(Vec3::Zero())
-        , depth(0.0f)
-        , bodyIndexA(-1)
-        , bodyIndexB(-1) {}
+    ContactPoint()
+        : location(Point3::Zero())
+        , direction(Point3::Zero())
+        , depth(static_cast<RealType>(0))
+        , entityA(-1)
+        , entityB(-1) 
+    {}
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using Contact = phys3d::ContactPoint;
+}
+
+#endif // PHYS3D_CONTACT_INFO_HPP

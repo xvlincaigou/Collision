@@ -1,49 +1,50 @@
-/**
- * @file force_builder.h
- * @brief Assembles forces and Jacobians for the physics simulation.
+/*
+ * Force and Jacobian Assembly System
  */
-#pragma once
+#ifndef PHYS3D_FORCE_ASSEMBLER_HPP
+#define PHYS3D_FORCE_ASSEMBLER_HPP
 
 #include "contact.h"
 #include "core/common.h"
 #include "scene/scene.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @class ForceBuilder
- * @brief Computes forces (gravity, penalty, friction) and Jacobians.
+/*
+ * ForceAssembler - Computes external forces and stiffness matrices
  */
-class ForceBuilder {
+class ForceAssembler 
+{
 public:
-    ForceBuilder();
+    ForceAssembler();
 
-    /// Initialize with the total degrees of freedom
-    void setup(Int dofCount);
+    void configure(IntType dofTotal);
 
-    /// Assemble all forces into the force vector
-    void assembleForces(Scene& scene, const Vector<Contact>& contacts, VecX& force);
+    void buildForceVector(World& world, const DynArray<ContactPoint>& contacts, VectorN& forceOut);
+    void buildStiffnessMatrix(World& world, const DynArray<ContactPoint>& contacts, SparseGrid& stiffnessOut);
 
-    /// Assemble the stiffness Jacobian
-    void assembleJacobian(Scene& scene, const Vector<Contact>& contacts, SparseMat& jacobian);
+    void setGravityVector(const Point3& g) { m_gravityAccel = g; }
+    void setContactStiffness(RealType k) { m_contactStiffness = k; }
+    void setFrictionStiffness(RealType k) { m_frictionStiffness = k; }
 
-    // Configuration
-    void setGravity(const Vec3& g) { gravity_ = g; }
-    void setPenaltyStiffness(Float k) { penaltyStiffness_ = k; }
-    void setFrictionStiffness(Float k) { frictionStiffness_ = k; }
-
-    [[nodiscard]] const Vec3& gravity() const { return gravity_; }
-    [[nodiscard]] Float penaltyStiffness() const { return penaltyStiffness_; }
+    [[nodiscard]] const Point3& gravityVector() const { return m_gravityAccel; }
+    [[nodiscard]] RealType contactStiffness() const { return m_contactStiffness; }
 
 private:
-    void addGravityForce(Scene& scene, VecX& force);
-    void addCollisionForce(Scene& scene, const Vector<Contact>& contacts, VecX& force);
-    void addCollisionJacobian(const Vector<Contact>& contacts, SparseMat& jacobian);
+    void accumulateGravity(World& world, VectorN& forceOut);
+    void accumulateContactForces(World& world, const DynArray<ContactPoint>& contacts, VectorN& forceOut);
+    void accumulateContactStiffness(const DynArray<ContactPoint>& contacts, SparseGrid& stiffnessOut);
 
-    Vec3  gravity_;
-    Float penaltyStiffness_;
-    Float frictionStiffness_;
-    Int   dofCount_;
+    Point3   m_gravityAccel;
+    RealType m_contactStiffness;
+    RealType m_frictionStiffness;
+    IntType  m_dofTotal;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using ForceBuilder = phys3d::ForceAssembler;
+}
+
+#endif // PHYS3D_FORCE_ASSEMBLER_HPP

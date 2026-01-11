@@ -1,85 +1,87 @@
-/**
- * @file body_properties.h
- * @brief Physical properties for rigid bodies.
+/*
+ * Physical Material and Mass Properties
  */
-#pragma once
+#ifndef PHYS3D_MATERIAL_PROPS_HPP
+#define PHYS3D_MATERIAL_PROPS_HPP
 
 #include "core/common.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @struct BodyProperties
- * @brief Physical properties of a rigid body (mass, inertia, material).
+/*
+ * MaterialProperties - Defines physical attributes of an entity
  */
-struct BodyProperties {
-    Float mass          = 1.0f;
-    Float massInv       = 1.0f;
-    Float linearDamping = 0.4f;
-    Float angularDamping = 0.1f;
-    Float restitution   = 0.0f;
-    Float friction      = 0.5f;
+struct MaterialProperties 
+{
+    RealType totalMass       = static_cast<RealType>(1);
+    RealType inverseMass     = static_cast<RealType>(1);
+    RealType linearDrag      = static_cast<RealType>(0.4);
+    RealType angularDrag     = static_cast<RealType>(0.1);
+    RealType bounciness      = static_cast<RealType>(0);
+    RealType surfaceFriction = static_cast<RealType>(0.5);
 
-    Mat3 inertiaBody    = Mat3::Identity();
-    Mat3 inertiaBodyInv = Mat3::Identity();
-    Vec3 centerOfMass   = Vec3::Zero();
+    Matrix33 localInertia    = Matrix33::Identity();
+    Matrix33 localInertiaInv = Matrix33::Identity();
+    Point3   massCentroid    = Point3::Zero();
 
-    // ========================================================================
-    // Mutators
-    // ========================================================================
-
-    void setMass(Float value) {
-        mass = clampPositive(value);
-        massInv = 1.0f / mass;
+    /* Mutators */
+    void assignMass(RealType value) 
+    {
+        totalMass = ensurePositive(value);
+        inverseMass = static_cast<RealType>(1) / totalMass;
     }
 
-    void setInertiaBody(const Mat3& value) {
-        inertiaBody = value;
-        inertiaBodyInv = invertSymmetric(inertiaBody);
+    void assignLocalInertia(const Matrix33& value) 
+    {
+        localInertia = value;
+        localInertiaInv = safeInvert(localInertia);
     }
 
-    void setCenterOfMass(const Vec3& value) {
-        centerOfMass = value;
+    void assignMassCentroid(const Point3& value) 
+    {
+        massCentroid = value;
     }
 
-    /// Finalize properties (recompute derived values)
-    void finalize() {
-        setMass(mass);
-        setInertiaBody(inertiaBody);
+    void prepare() 
+    {
+        assignMass(totalMass);
+        assignLocalInertia(localInertia);
     }
 
-    // ========================================================================
-    // Validation
-    // ========================================================================
-
-    [[nodiscard]] bool isValid() const {
-        bool positiveMass = mass > 0.0f && std::isfinite(mass);
-        bool finiteInertia = inertiaBody.allFinite() && inertiaBodyInv.allFinite();
-        return positiveMass && finiteInertia;
+    /* Validation */
+    [[nodiscard]] bool wellDefined() const 
+    {
+        bool massOk = totalMass > static_cast<RealType>(0) && std::isfinite(totalMass);
+        bool inertiaOk = localInertia.allFinite() && localInertiaInv.allFinite();
+        return massOk && inertiaOk;
     }
 
-    [[nodiscard]] bool isDynamic() const {
-        return massInv > 0.0f;
+    [[nodiscard]] bool isMovable() const 
+    {
+        return inverseMass > static_cast<RealType>(0);
     }
 
-    // ========================================================================
-    // Factory methods
-    // ========================================================================
-
-    /// Create properties for a static (immovable) body
-    static BodyProperties createStatic() {
-        BodyProperties props;
-        props.mass = std::numeric_limits<Float>::infinity();
-        props.massInv = 0.0f;
+    /* Factory Methods */
+    static MaterialProperties createImmovable() 
+    {
+        MaterialProperties props;
+        props.totalMass = std::numeric_limits<RealType>::infinity();
+        props.inverseMass = static_cast<RealType>(0);
         return props;
     }
 
-    /// Create default dynamic body properties
-    static BodyProperties createDynamic(Float mass = 1.0f) {
-        BodyProperties props;
-        props.setMass(mass);
+    static MaterialProperties createDefault(RealType mass = static_cast<RealType>(1)) 
+    {
+        MaterialProperties props;
+        props.assignMass(mass);
         return props;
     }
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using BodyProperties = phys3d::MaterialProperties;
+}
+
+#endif // PHYS3D_MATERIAL_PROPS_HPP

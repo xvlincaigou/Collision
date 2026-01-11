@@ -1,8 +1,8 @@
-/**
- * @file common.h
- * @brief Core type definitions and common utilities for the rigid body simulator.
+/*
+ * Fundamental Types and Core Utilities for Physics Simulation Engine
  */
-#pragma once
+#ifndef PHYS3D_FOUNDATION_TYPES_HPP
+#define PHYS3D_FOUNDATION_TYPES_HPP
 
 #include <cmath>
 #include <limits>
@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-// Third-party libraries
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/concurrent_vector.h>
@@ -23,178 +22,217 @@
 #include <Eigen/Geometry>
 #include <Eigen/Sparse>
 
-// Build configuration
-// #define RIGID_DEBUGGER
+// #define PHYS3D_ENABLE_DEBUG
 #define RIGID_USE_CUDA
 // #undef RIGID_USE_CUDA
 
-// CUDA types (must be included BEFORE namespace)
 #if defined(RIGID_USE_CUDA)
 #include <cuda_runtime.h>
 #endif
 
-namespace rigid {
+namespace phys3d {
 
-// ============================================================================
-// Fundamental type aliases
-// ============================================================================
+/* =========== Primitive Type Definitions =========== */
 
-using Int     = int;
-using Int64   = long int;
-using UInt    = unsigned int;
-using Float   = float;
-using Double  = double;
-using String  = std::string;
+typedef int                 IntType;
+typedef long int            Int64Type;
+typedef unsigned int        UIntType;
+typedef float               RealType;
+typedef double              DoubleType;
+typedef std::string         TextType;
 
 template <typename T>
-using Vector = std::vector<T>;
+using DynArray = std::vector<T>;
 
 template <typename T>
-using UniquePtr = std::unique_ptr<T>;
+using SolePtr = std::unique_ptr<T>;
 
 template <typename T>
-using SharedPtr = std::shared_ptr<T>;
+using JointPtr = std::shared_ptr<T>;
 
-// ============================================================================
-// Linear algebra types (Eigen-based)
-// ============================================================================
+/* =========== Linear Algebra Primitives =========== */
 
-using Vec3      = Eigen::Vector3f;
-using Vec4      = Eigen::Vector4f;
-using Mat3      = Eigen::Matrix3f;
-using Mat4      = Eigen::Matrix4f;
-using VecX      = Eigen::VectorXf;
-using MatX      = Eigen::MatrixXf;
-using Quat      = Eigen::Quaternionf;
-using Triangle  = Eigen::Vector3i;
-using SparseMat = Eigen::SparseMatrix<Float>;
-using Triplet   = Eigen::Triplet<Float>;
-using Triplets  = Vector<Triplet>;
+typedef Eigen::Vector3f                     Point3;
+typedef Eigen::Vector4f                     Point4;
+typedef Eigen::Matrix3f                     Matrix33;
+typedef Eigen::Matrix4f                     Matrix44;
+typedef Eigen::VectorXf                     VectorN;
+typedef Eigen::MatrixXf                     MatrixMN;
+typedef Eigen::Quaternionf                  Rotation4;
+typedef Eigen::Vector3i                     Triplet3i;
+typedef Eigen::SparseMatrix<RealType>       SparseGrid;
+typedef Eigen::Triplet<RealType>            SparseEntry;
+typedef DynArray<SparseEntry>               SparseEntryList;
 
-// ============================================================================
-// CUDA type aliases (redirect to global namespace)
-// ============================================================================
+/* =========== CUDA Compatibility Layer =========== */
 
 #if defined(RIGID_USE_CUDA)
+typedef ::int3      CudaInt3;
+typedef ::float3    CudaFloat3;
+typedef ::float4    CudaFloat4;
+#endif
 
-using Int3   = ::int3;
-using Float3 = ::float3;
-using Float4 = ::float4;
+/* =========== Bounding Volume Definition =========== */
 
-#endif  // RIGID_USE_CUDA
+struct BoundingBox3D 
+{
+    Point3 corner_lo;
+    Point3 corner_hi;
 
-// ============================================================================
-// Axis-Aligned Bounding Box
-// ============================================================================
+    BoundingBox3D() { invalidate(); }
 
-struct AABB {
-    Vec3 min_pt;
-    Vec3 max_pt;
+    BoundingBox3D(const Point3& lo, const Point3& hi)
+        : corner_lo(lo), corner_hi(hi) {}
 
-    AABB() { reset(); }
-
-    AABB(const Vec3& min_corner, const Vec3& max_corner)
-        : min_pt(min_corner), max_pt(max_corner) {}
-
-    void reset() {
-        constexpr Float inf = std::numeric_limits<Float>::infinity();
-        min_pt = Vec3(inf, inf, inf);
-        max_pt = Vec3(-inf, -inf, -inf);
+    void invalidate() 
+    {
+        constexpr RealType kInf = std::numeric_limits<RealType>::infinity();
+        corner_lo = Point3(kInf, kInf, kInf);
+        corner_hi = Point3(-kInf, -kInf, -kInf);
     }
 
-    void expand(const Vec3& point) {
-        min_pt = min_pt.cwiseMin(point);
-        max_pt = max_pt.cwiseMax(point);
+    void enclose(const Point3& pt) 
+    {
+        corner_lo = corner_lo.cwiseMin(pt);
+        corner_hi = corner_hi.cwiseMax(pt);
     }
 
-    void merge(const AABB& other) {
-        min_pt = min_pt.cwiseMin(other.min_pt);
-        max_pt = max_pt.cwiseMax(other.max_pt);
+    void unite(const BoundingBox3D& rhs) 
+    {
+        corner_lo = corner_lo.cwiseMin(rhs.corner_lo);
+        corner_hi = corner_hi.cwiseMax(rhs.corner_hi);
     }
 
-    [[nodiscard]] bool isValid() const {
-        return (min_pt.array() <= max_pt.array()).all();
+    [[nodiscard]] bool valid() const 
+    {
+        return (corner_lo.array() <= corner_hi.array()).all();
     }
 
-    [[nodiscard]] Vec3 center() const {
-        return (min_pt + max_pt) * 0.5f;
+    [[nodiscard]] Point3 midpoint() const 
+    {
+        return (corner_lo + corner_hi) * static_cast<RealType>(0.5);
     }
 
-    [[nodiscard]] Vec3 extents() const {
-        return (max_pt - min_pt) * 0.5f;
+    [[nodiscard]] Point3 halfSize() const 
+    {
+        return (corner_hi - corner_lo) * static_cast<RealType>(0.5);
     }
 
-    [[nodiscard]] Vec3 size() const {
-        return max_pt - min_pt;
+    [[nodiscard]] Point3 dimensions() const 
+    {
+        return corner_hi - corner_lo;
     }
 
-    [[nodiscard]] bool intersects(const AABB& other) const {
-        return (min_pt.array() <= other.max_pt.array()).all() &&
-               (max_pt.array() >= other.min_pt.array()).all();
+    [[nodiscard]] bool overlaps(const BoundingBox3D& rhs) const 
+    {
+        bool xOk = (corner_lo.x() <= rhs.corner_hi.x()) && (corner_hi.x() >= rhs.corner_lo.x());
+        bool yOk = (corner_lo.y() <= rhs.corner_hi.y()) && (corner_hi.y() >= rhs.corner_lo.y());
+        bool zOk = (corner_lo.z() <= rhs.corner_hi.z()) && (corner_hi.z() >= rhs.corner_lo.z());
+        return xOk && yOk && zOk;
     }
 
-    [[nodiscard]] bool contains(const Vec3& point) const {
-        return (point.array() >= min_pt.array()).all() &&
-               (point.array() <= max_pt.array()).all();
-    }
-};
-
-// ============================================================================
-// Plane representation (normal + offset: n·x = d)
-// ============================================================================
-
-struct Plane {
-    Vec3  normal = Vec3::Zero();
-    Float offset = 0.0f;
-
-    Plane() = default;
-    Plane(const Vec3& n, Float d) : normal(n), offset(d) {}
-
-    [[nodiscard]] Float signedDistance(const Vec3& point) const {
-        return normal.dot(point) - offset;
+    [[nodiscard]] bool enclosesPoint(const Point3& pt) const 
+    {
+        bool inX = (pt.x() >= corner_lo.x()) && (pt.x() <= corner_hi.x());
+        bool inY = (pt.y() >= corner_lo.y()) && (pt.y() <= corner_hi.y());
+        bool inZ = (pt.z() >= corner_lo.z()) && (pt.z() <= corner_hi.z());
+        return inX && inY && inZ;
     }
 };
 
-// ============================================================================
-// Utility functions
-// ============================================================================
+/* =========== Half-Space Definition =========== */
 
-/// Create a Vec3 with positive infinity components
-inline Vec3 positiveInfinity() {
-    constexpr Float inf = std::numeric_limits<Float>::infinity();
-    return {inf, inf, inf};
-}
+struct HalfSpace3D 
+{
+    Point3   direction = Point3::Zero();
+    RealType distance  = static_cast<RealType>(0);
 
-/// Create a Vec3 with negative infinity components
-inline Vec3 negativeInfinity() {
-    constexpr Float inf = std::numeric_limits<Float>::infinity();
-    return {-inf, -inf, -inf};
-}
+    HalfSpace3D() = default;
+    HalfSpace3D(const Point3& dir, RealType dist) : direction(dir), distance(dist) {}
 
-/// Clamp a value to be positive (at least epsilon)
-inline Float clampPositive(Float value) {
-    constexpr Float eps = std::numeric_limits<Float>::epsilon();
-    return value < eps ? eps : value;
-}
-
-/// Compute the inverse of a symmetric positive-definite matrix
-inline Mat3 invertSymmetric(const Mat3& M) {
-    Eigen::LDLT<Mat3> ldlt(M);
-    if (ldlt.info() == Eigen::Success) {
-        return ldlt.solve(Mat3::Identity());
+    [[nodiscard]] RealType evaluate(const Point3& pt) const 
+    {
+        return direction.dot(pt) - distance;
     }
-    // Fallback to pseudo-inverse
-    return M.completeOrthogonalDecomposition().pseudoInverse();
+};
+
+/* =========== Utility Functions =========== */
+
+inline Point3 makeInfinityVec() 
+{
+    constexpr RealType kInf = std::numeric_limits<RealType>::infinity();
+    return Point3(kInf, kInf, kInf);
 }
 
-/// Compute global DOF index for a rigid body (6 DOF per body)
-inline Int globalDofIndex(Int bodyIndex) {
-    return bodyIndex * 6;
+inline Point3 makeNegInfinityVec() 
+{
+    constexpr RealType kInf = std::numeric_limits<RealType>::infinity();
+    return Point3(-kInf, -kInf, -kInf);
 }
 
-/// Check if a string starts with a given prefix
-inline bool startsWith(const String& str, const char* prefix) {
+inline RealType ensurePositive(RealType val) 
+{
+    constexpr RealType kEps = std::numeric_limits<RealType>::epsilon();
+    return (val < kEps) ? kEps : val;
+}
+
+inline Matrix33 safeInvert(const Matrix33& mat) 
+{
+    Eigen::LDLT<Matrix33> decomp(mat);
+    if (decomp.info() == Eigen::Success) {
+        return decomp.solve(Matrix33::Identity());
+    }
+    return mat.completeOrthogonalDecomposition().pseudoInverse();
+}
+
+inline IntType computeDofOffset(IntType entityIdx) 
+{
+    return entityIdx * 6;
+}
+
+inline bool hasPrefix(const TextType& str, const char* prefix) 
+{
     return str.compare(0, std::char_traits<char>::length(prefix), prefix) == 0;
 }
 
-}  // namespace rigid
+}  // namespace phys3d
+
+/* =========== Backward Compatibility Layer =========== */
+namespace rigid {
+    using namespace phys3d;
+    using Int = IntType;
+    using Int64 = Int64Type;
+    using UInt = UIntType;
+    using Float = RealType;
+    using Double = DoubleType;
+    using String = TextType;
+    template<typename T> using Vector = DynArray<T>;
+    template<typename T> using UniquePtr = SolePtr<T>;
+    template<typename T> using SharedPtr = JointPtr<T>;
+    using Vec3 = Point3;
+    using Vec4 = Point4;
+    using Mat3 = Matrix33;
+    using Mat4 = Matrix44;
+    using VecX = VectorN;
+    using MatX = MatrixMN;
+    using Quat = Rotation4;
+    using Triangle = Triplet3i;
+    using SparseMat = SparseGrid;
+    using Triplet = SparseEntry;
+    using Triplets = SparseEntryList;
+    using AABB = BoundingBox3D;
+    using Plane = HalfSpace3D;
+#if defined(RIGID_USE_CUDA)
+    using Int3 = CudaInt3;
+    using Float3 = CudaFloat3;
+    using Float4 = CudaFloat4;
+#endif
+    inline Point3 positiveInfinity() { return makeInfinityVec(); }
+    inline Point3 negativeInfinity() { return makeNegInfinityVec(); }
+    inline RealType clampPositive(RealType v) { return ensurePositive(v); }
+    inline Matrix33 invertSymmetric(const Matrix33& m) { return safeInvert(m); }
+    inline IntType globalDofIndex(IntType idx) { return computeDofOffset(idx); }
+    inline bool startsWith(const TextType& s, const char* p) { return hasPrefix(s, p); }
+}
+
+#endif // PHYS3D_FOUNDATION_TYPES_HPP

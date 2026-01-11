@@ -1,8 +1,8 @@
-/**
- * @file collision_detector.cuh
- * @brief GPU-accelerated collision detection.
+/*
+ * GPU-Accelerated Narrow Phase Collision Detection
  */
-#pragma once
+#ifndef PHYS3D_DEVICE_COLLISION_DETECTOR_CUH
+#define PHYS3D_DEVICE_COLLISION_DETECTOR_CUH
 
 #include <cuda_runtime.h>
 
@@ -10,116 +10,145 @@
 #include "broadphase.cuh"
 #include "core/common.h"
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-/// Device-side contact
-struct ContactDevice {
-    Int bodyIndexA;
-    Int bodyIndexB;
-    Float3 position;
-    Float3 normal;
-    Float depth;
+struct DeviceContact 
+{
+    IntType entityIdxA;
+    IntType entityIdxB;
+    CudaFloat3 worldPoint;
+    CudaFloat3 worldNormal;
+    RealType penetration;
 };
 
-/// Device-side plane
-struct PlaneDevice {
-    Float3 normal;
-    Float offset;
+struct DevicePlane 
+{
+    CudaFloat3 direction;
+    RealType offset;
 };
 
-/// Device-side body transform
-struct BodyTransformDevice {
-    Float3 position;
-    Float4 orientation;  // Quaternion (x, y, z, w)
+struct EntityTransform 
+{
+    CudaFloat3 translation;
+    CudaFloat4 rotation;
 };
 
-/**
- * @class CollisionDetectorGPU
- * @brief CUDA-based collision detection.
- */
-class CollisionDetectorGPU {
+class NarrowPhaseDetector 
+{
 public:
-    CollisionDetectorGPU();
-    ~CollisionDetectorGPU();
+    NarrowPhaseDetector();
+    ~NarrowPhaseDetector();
 
-    void setBVH(BVHBuilderGPU* bvhBuilder);
+    void assignTree(DeviceTreeBuilder* treeBuilder);
 
-    void detectBodyEnvironment(Int bodyIdx,
-                                const BodyTransformDevice& transform,
-                                const PlaneDevice* planes,
-                                Int numPlanes,
-                                Vector<ContactDevice>& outContacts);
+    void detectEntityEnvironment(IntType entityIdx,
+                                  const EntityTransform& transform,
+                                  const DevicePlane* planeArray,
+                                  IntType planeCount,
+                                  DynArray<DeviceContact>& contactResults);
 
-    void detectBodyBody(Int bodyAIdx,
-                        const BodyTransformDevice& transformA,
-                        BVHBuilderGPU* bvhA,
-                        Int bodyBIdx,
-                        const BodyTransformDevice& transformB,
-                        BVHBuilderGPU* bvhB,
-                        Vector<ContactDevice>& outContacts);
+    void detectEntityEntity(IntType entityAIdx,
+                             const EntityTransform& transformA,
+                             DeviceTreeBuilder* treeA,
+                             IntType entityBIdx,
+                             const EntityTransform& transformB,
+                             DeviceTreeBuilder* treeB,
+                             DynArray<DeviceContact>& contactResults);
 
-    void broadphaseDetect(const Vector<Vec3>& aabbMins,
-                          const Vector<Vec3>& aabbMaxs,
-                          Vector<CollisionPair>& outPairs);
+    void performBroadPhase(const DynArray<Point3>& boundsMin,
+                            const DynArray<Point3>& boundsMax,
+                            DynArray<EntityPair>& candidatePairs);
 
-    void free();
+    void release();
 
 private:
-    ContactDevice* dContacts_ = nullptr;
-    Int* dContactCount_       = nullptr;
-    Int maxContacts_          = 65536;
+    DeviceContact* m_dContactBuffer = nullptr;
+    IntType* m_dContactCounter      = nullptr;
+    IntType m_contactLimit          = 65536;
 
-    PlaneDevice* dPlanes_     = nullptr;
-    Int numPlanes_            = 0;
+    DevicePlane* m_dPlaneBuffer     = nullptr;
+    IntType m_planeBufferSize       = 0;
 
-    BVHBuilderGPU* bvh_       = nullptr;
-    UniquePtr<BroadphaseGPU> broadphase_;
+    DeviceTreeBuilder* m_activeTree = nullptr;
+    SolePtr<BroadPhaseDetector> m_broadPhase;
 };
 
-// ============================================================================
-// Device Helper Functions
-// ============================================================================
+/* ========== Device Helper Functions ========== */
 
-__device__ inline Float3 operator+(Float3 a, Float3 b) {
+__device__ inline CudaFloat3 operator+(CudaFloat3 a, CudaFloat3 b) 
+{
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-__device__ inline Float3 operator-(Float3 a, Float3 b) {
+__device__ inline CudaFloat3 operator-(CudaFloat3 a, CudaFloat3 b) 
+{
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-__device__ inline Float3 operator*(Float3 a, Float s) {
+__device__ inline CudaFloat3 operator*(CudaFloat3 a, RealType s) 
+{
     return make_float3(a.x * s, a.y * s, a.z * s);
 }
 
-__device__ inline Float dot(Float3 a, Float3 b) {
+__device__ inline RealType innerProduct(CudaFloat3 a, CudaFloat3 b) 
+{
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-__device__ inline Float3 cross(Float3 a, Float3 b) {
+__device__ inline CudaFloat3 crossProduct(CudaFloat3 a, CudaFloat3 b) 
+{
     return make_float3(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
         a.x * b.y - a.y * b.x);
 }
 
-__device__ inline Float3 rotateByQuat(Float3 v, Float4 q) {
-    Float3 u = make_float3(q.x, q.y, q.z);
-    Float s = q.w;
-    return u * (2.0f * dot(u, v)) + v * (s * s - dot(u, u)) + cross(u, v) * (2.0f * s);
+__device__ inline CudaFloat3 applyQuaternion(CudaFloat3 v, CudaFloat4 q) 
+{
+    CudaFloat3 qVec = make_float3(q.x, q.y, q.z);
+    RealType qScalar = q.w;
+    return qVec * (static_cast<RealType>(2) * innerProduct(qVec, v)) + 
+           v * (qScalar * qScalar - innerProduct(qVec, qVec)) + 
+           crossProduct(qVec, v) * (static_cast<RealType>(2) * qScalar);
 }
 
-__device__ inline bool aabbIntersectsPlane(const AABBDevice& box,
-                                            Float3 normal, Float offset) {
-    Float3 center = (box.min + box.max) * 0.5f;
-    Float3 extents = (box.max - box.min) * 0.5f;
-    Float r = extents.x * fabsf(normal.x) +
-              extents.y * fabsf(normal.y) +
-              extents.z * fabsf(normal.z);
-    Float s = dot(normal, center) - offset;
-    return s <= r;
+__device__ inline bool boundsPlaneOverlap(const DeviceBounds3D& box,
+                                           CudaFloat3 normal, RealType offset) 
+{
+    CudaFloat3 center = (box.lo + box.hi) * static_cast<RealType>(0.5);
+    CudaFloat3 halfDim = (box.hi - box.lo) * static_cast<RealType>(0.5);
+    RealType radius = halfDim.x * fabsf(normal.x) +
+                      halfDim.y * fabsf(normal.y) +
+                      halfDim.z * fabsf(normal.z);
+    RealType signedDist = innerProduct(normal, center) - offset;
+    return signedDist <= radius;
 }
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+namespace gpu {
+    using CollisionDetectorGPU = phys3d::gpu::NarrowPhaseDetector;
+    using ContactDevice = phys3d::gpu::DeviceContact;
+    using PlaneDevice = phys3d::gpu::DevicePlane;
+    using BodyTransformDevice = phys3d::gpu::EntityTransform;
+    
+    __device__ inline phys3d::RealType dot(phys3d::CudaFloat3 a, phys3d::CudaFloat3 b) {
+        return phys3d::gpu::innerProduct(a, b);
+    }
+    __device__ inline phys3d::CudaFloat3 cross(phys3d::CudaFloat3 a, phys3d::CudaFloat3 b) {
+        return phys3d::gpu::crossProduct(a, b);
+    }
+    __device__ inline phys3d::CudaFloat3 rotateByQuat(phys3d::CudaFloat3 v, phys3d::CudaFloat4 q) {
+        return phys3d::gpu::applyQuaternion(v, q);
+    }
+    __device__ inline bool aabbIntersectsPlane(const phys3d::gpu::DeviceBounds3D& b,
+                                                phys3d::CudaFloat3 n, phys3d::RealType o) {
+        return phys3d::gpu::boundsPlaneOverlap(b, n, o);
+    }
+}
+}
+
+#endif // PHYS3D_DEVICE_COLLISION_DETECTOR_CUH

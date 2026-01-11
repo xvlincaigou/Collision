@@ -1,51 +1,52 @@
-/**
- * @file environment.h
- * @brief Simulation environment with boundary planes.
+/*
+ * Simulation Domain Boundaries
  */
-#pragma once
+#ifndef PHYS3D_BOUNDARIES_HPP
+#define PHYS3D_BOUNDARIES_HPP
 
 #include "core/common.h"
 
-namespace rigid {
+namespace phys3d {
 
-/**
- * @class Environment
- * @brief Defines the simulation environment boundaries.
- *
- * The environment is an axis-aligned box defined by 6 boundary planes.
+/*
+ * Boundaries - Axis-aligned box defined by 6 bounding planes
  */
-class Environment {
+class Boundaries 
+{
 public:
-    enum BoundaryId : Int {
-        kNegX = 0,
-        kPosX,
-        kNegY,
-        kPosY,
-        kNegZ,
-        kPosZ,
-        kBoundaryCount
+    enum PlaneId : IntType 
+    {
+        kMinX = 0,
+        kMaxX,
+        kMinY,
+        kMaxY,
+        kMinZ,
+        kMaxZ,
+        kPlaneTotal
     };
 
-    Environment();
+    Boundaries();
 
-    /// Set the environment bounds as an AABB
-    void setBounds(const Vec3& minCorner, const Vec3& maxCorner);
+    void defineBounds(const Point3& lowerCorner, const Point3& upperCorner);
 
-    /// Get a boundary plane by ID
-    [[nodiscard]] Plane& plane(BoundaryId id) { return planes_[id]; }
-    [[nodiscard]] const Plane& plane(BoundaryId id) const { return planes_[id]; }
+    [[nodiscard]] HalfSpace3D& planeAt(PlaneId id) { return m_planes[id]; }
+    [[nodiscard]] const HalfSpace3D& planeAt(PlaneId id) const { return m_planes[id]; }
 
-    /// Get boundary count
-    static constexpr Int boundaryCount() { return kBoundaryCount; }
+    static constexpr IntType planeCount() { return kPlaneTotal; }
 
-    /// Get the AABB of the environment
-    [[nodiscard]] const Vec3& minCorner() const { return minCorner_; }
-    [[nodiscard]] const Vec3& maxCorner() const { return maxCorner_; }
+    [[nodiscard]] const Point3& lowerCorner() const { return m_lowerCorner; }
+    [[nodiscard]] const Point3& upperCorner() const { return m_upperCorner; }
 
 private:
-    Plane planes_[kBoundaryCount];
-    Vec3 minCorner_;
-    Vec3 maxCorner_;
+    HalfSpace3D m_planes[kPlaneTotal];
+    Point3 m_lowerCorner;
+    Point3 m_upperCorner;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using Environment = phys3d::Boundaries;
+}
+
+#endif // PHYS3D_BOUNDARIES_HPP

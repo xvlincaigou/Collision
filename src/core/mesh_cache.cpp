@@ -1,67 +1,78 @@
-/**
- * @file mesh_cache.cpp
- * @brief Implementation of the MeshCache class.
+/*
+ * Implementation: SurfaceResourcePool class
  */
 #include "mesh_cache.h"
 #include "mesh.h"
 #include "accel/bvh.h"
 
-namespace rigid {
+namespace phys3d {
 
-MeshCache& MeshCache::instance() {
-    static MeshCache inst;
-    return inst;
+SurfaceResourcePool& SurfaceResourcePool::global() 
+{
+    static SurfaceResourcePool singletonInstance;
+    return singletonInstance;
 }
 
-SharedPtr<Mesh> MeshCache::acquire(const String& path, bool buildBVH) {
-    std::lock_guard<std::mutex> lock(mutex_);
+JointPtr<TriangleSurface> SurfaceResourcePool::fetch(const TextType& resourcePath, bool constructTree) 
+{
+    std::lock_guard<std::mutex> scopedLock(m_guard);
 
-    // Check if already cached and still valid
-    auto it = cache_.find(path);
-    if (it != cache_.end()) {
-        if (auto mesh = it->second.lock()) {
-            return mesh;
-        }
-        // Entry expired, will be replaced
-    }
-
-    // Load new mesh
-    auto mesh = loadMesh(path, buildBVH);
-    if (mesh) {
-        cache_[path] = mesh;
-    }
-
-    return mesh;
-}
-
-void MeshCache::clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    cache_.clear();
-}
-
-void MeshCache::cleanup() {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    for (auto it = cache_.begin(); it != cache_.end();) {
-        if (it->second.expired()) {
-            it = cache_.erase(it);
-        } else {
-            ++it;
+    auto iter = m_storage.find(resourcePath);
+    if (iter != m_storage.end()) 
+    {
+        if (auto existingSurface = iter->second.lock()) 
+        {
+            return existingSurface;
         }
     }
+
+    auto freshSurface = loadFromDisk(resourcePath, constructTree);
+    if (freshSurface) 
+    {
+        m_storage[resourcePath] = freshSurface;
+    }
+
+    return freshSurface;
 }
 
-size_t MeshCache::size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return cache_.size();
+void SurfaceResourcePool::purgeAll() 
+{
+    std::lock_guard<std::mutex> scopedLock(m_guard);
+    m_storage.clear();
 }
 
-SharedPtr<Mesh> MeshCache::loadMesh(const String& path, bool buildBVH) {
-    auto mesh = std::make_shared<Mesh>();
-    if (!mesh->loadFromOBJ(path, buildBVH)) {
+void SurfaceResourcePool::removeExpired() 
+{
+    std::lock_guard<std::mutex> scopedLock(m_guard);
+
+    auto iter = m_storage.begin();
+    while (iter != m_storage.end()) 
+    {
+        if (iter->second.expired()) 
+        {
+            iter = m_storage.erase(iter);
+        } 
+        else 
+        {
+            ++iter;
+        }
+    }
+}
+
+size_t SurfaceResourcePool::entryCount() const 
+{
+    std::lock_guard<std::mutex> scopedLock(m_guard);
+    return m_storage.size();
+}
+
+JointPtr<TriangleSurface> SurfaceResourcePool::loadFromDisk(const TextType& resourcePath, bool constructTree) 
+{
+    auto newSurface = std::make_shared<TriangleSurface>();
+    if (!newSurface->parseWavefrontFile(resourcePath, constructTree)) 
+    {
         return nullptr;
     }
-    return mesh;
+    return newSurface;
 }
 
-}  // namespace rigid
+}  // namespace phys3d

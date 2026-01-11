@@ -1,126 +1,113 @@
-/**
- * @file collision_detector.h
- * @brief Collision detection system for rigid bodies.
+/*
+ * Collision Detection System
  */
-#pragma once
+#ifndef PHYS3D_COLLISION_SYSTEM_HPP
+#define PHYS3D_COLLISION_SYSTEM_HPP
 
 #include "contact.h"
 #include "core/common.h"
 #include "scene/scene.h"
 #include "accel/bvh.h"
 
-namespace rigid {
+namespace phys3d {
 
-// Forward declarations
 namespace gpu {
-class CollisionDetectorGPU;
-struct ContactDevice;
-struct CollisionPair;
+class NarrowPhaseDetector;
+struct DeviceContact;
+struct EntityPair;
 }
 
-/**
- * @class CollisionDetector
- * @brief Detects collisions between bodies and environment.
+/*
+ * CollisionSystem - Detects collisions between entities and environment
  */
-class CollisionDetector {
+class CollisionSystem 
+{
 public:
-    CollisionDetector();
-    ~CollisionDetector();
+    CollisionSystem();
+    ~CollisionSystem();
 
-    /// Clear all detected contacts
-    void clear() { contacts_.clear(); }
+    void reset() { m_contactList.clear(); }
 
-    /// Detect all collisions in the scene
-    void detectCollisions(Scene& scene);
+    void performDetection(World& world);
 
-    /// Get the detected contacts
-    [[nodiscard]] const Vector<Contact>& contacts() const { return contacts_; }
+    [[nodiscard]] const DynArray<ContactPoint>& contactList() const { return m_contactList; }
 
-    /// Enable/disable GPU acceleration
-    void setUseGPU(bool use) { useGPU_ = use; }
-    [[nodiscard]] bool useGPU() const { return useGPU_; }
+    void enableDeviceAcceleration(bool enable) { m_useDevice = enable; }
+    [[nodiscard]] bool deviceAccelerationEnabled() const { return m_useDevice; }
 
 private:
-    // CPU collision detection
-    void detectBodyEnvironment(Int bodyIdx, RigidBody& body, Environment& env);
-    void detectBodyBody(Int idxA, RigidBody& bodyA, Int idxB, RigidBody& bodyB);
-    void detectVertexMesh(Int dynamicIdx, RigidBody& dynamic,
-                          Int staticIdx, RigidBody& statik);
+    void detectEntityEnvironment(IntType entityIdx, DynamicEntity& entity, Boundaries& env);
+    void detectEntityEntity(IntType idxA, DynamicEntity& entityA, IntType idxB, DynamicEntity& entityB);
+    void detectPointsAgainstSurface(IntType dynamicIdx, DynamicEntity& dynamic,
+                                     IntType staticIdx, DynamicEntity& stationary);
 
-    // BVH traversal helpers
-    void traverseBVHPlane(const BVHNode& node, const BVH& bvh,
-                          const Plane& planeLocal,
-                          const Vector<Vec3>& vertices,
-                          const Vector<Triangle>& triangles,
-                          const Mat3& bodyRot, const Vec3& bodyPos,
-                          Int bodyIdx, const Vec3& planeWorldNormal,
-                          Vector<bool>& visitedVerts);
+    void traverseTreeAgainstPlane(const TreeNode& node, const SpatialTree& tree,
+                                   const HalfSpace3D& localPlane,
+                                   const DynArray<Point3>& pointCloud,
+                                   const DynArray<Triplet3i>& faces,
+                                   const Matrix33& rotMat, const Point3& translation,
+                                   IntType entityIdx, const Point3& worldPlaneNormal,
+                                   DynArray<bool>& visitedPoints);
 
-    void traverseBVHPoint(const BVHNode& node, const BVH& bvh,
-                          const Vec3& pointLocal,
-                          const Vector<Vec3>& vertices,
-                          const Vector<Triangle>& triangles,
-                          Float& minDistSq, Vec3& closestNormal,
-                          Vec3& closestPos, bool& found);
+    void traverseTreeAgainstPoint(const TreeNode& node, const SpatialTree& tree,
+                                   const Point3& queryLocal,
+                                   const DynArray<Point3>& pointCloud,
+                                   const DynArray<Triplet3i>& faces,
+                                   RealType& minDistSq, Point3& closestNormal,
+                                   Point3& closestPos, bool& foundContact);
 
-    // GPU collision detection
-    void detectCollisionsGPU(Scene& scene);
-    void convertGPUContacts(const Vector<gpu::ContactDevice>& gpuContacts);
-    void broadphaseGPU(Scene& scene, Vector<std::pair<Int, Int>>& pairs);
+    void performDeviceDetection(World& world);
+    void convertDeviceContacts(const DynArray<gpu::DeviceContact>& deviceContacts);
+    void deviceBroadPhase(World& world, DynArray<std::pair<IntType, IntType>>& candidatePairs);
 
-    Vector<Contact> contacts_;
-    bool useGPU_ = true;
+    DynArray<ContactPoint> m_contactList;
+    bool m_useDevice = true;
 
-    UniquePtr<gpu::CollisionDetectorGPU> gpuDetector_;
+    SolePtr<gpu::NarrowPhaseDetector> m_deviceDetector;
 };
 
-// ============================================================================
-// Triangle collision helper (used by both CPU and GPU paths)
-// ============================================================================
-
-/**
- * @brief Check if a point penetrates a triangle.
- * @return True if collision found and closer than current minimum.
- */
-inline bool checkTriangleCollision(
-    const Vec3& pointLocal,
-    const Vec3& v0, const Vec3& v1, const Vec3& v2,
-    Float& minDistSq,
-    Vec3& outNormal,
-    Vec3& outPoint)
+/* Triangle collision helper */
+inline bool testTrianglePenetration(
+    const Point3& queryLocal,
+    const Point3& v0, const Point3& v1, const Point3& v2,
+    RealType& minDistSq,
+    Point3& outNormal,
+    Point3& outPoint)
 {
-    Vec3 edge1 = v1 - v0;
-    Vec3 edge2 = v2 - v0;
-    Vec3 normal = edge1.cross(edge2).normalized();
+    Point3 e1 = v1 - v0;
+    Point3 e2 = v2 - v0;
+    Point3 faceNormal = e1.cross(e2).normalized();
 
-    Float planeDist = (pointLocal - v0).dot(normal);
-    constexpr Float kPenetrationThreshold = -0.5f;
+    RealType planeDist = (queryLocal - v0).dot(faceNormal);
+    constexpr RealType kPenetrationLimit = static_cast<RealType>(-0.5);
 
-    if (planeDist < 0.0f && planeDist > kPenetrationThreshold) {
-        Float distSq = planeDist * planeDist;
-        if (distSq < minDistSq) {
-            // Project point onto triangle plane
-            Vec3 proj = pointLocal - normal * planeDist;
-            Vec3 v2Proj = proj - v0;
+    if (planeDist < static_cast<RealType>(0) && planeDist > kPenetrationLimit) 
+    {
+        RealType distSq = planeDist * planeDist;
+        if (distSq < minDistSq) 
+        {
+            Point3 projected = queryLocal - faceNormal * planeDist;
+            Point3 projRel = projected - v0;
 
-            // Barycentric coordinates
-            Float d00 = edge1.dot(edge1);
-            Float d01 = edge1.dot(edge2);
-            Float d11 = edge2.dot(edge2);
-            Float d20 = v2Proj.dot(edge1);
-            Float d21 = v2Proj.dot(edge2);
-            Float denom = d00 * d11 - d01 * d01;
+            RealType d00 = e1.dot(e1);
+            RealType d01 = e1.dot(e2);
+            RealType d11 = e2.dot(e2);
+            RealType d20 = projRel.dot(e1);
+            RealType d21 = projRel.dot(e2);
+            RealType denom = d00 * d11 - d01 * d01;
 
-            if (std::abs(denom) > 1e-8f) {
-                Float invDenom = 1.0f / denom;
-                Float v = (d11 * d20 - d01 * d21) * invDenom;
-                Float w = (d00 * d21 - d01 * d20) * invDenom;
-                Float u = 1.0f - v - w;
+            if (std::abs(denom) > static_cast<RealType>(1e-8)) 
+            {
+                RealType denomInv = static_cast<RealType>(1) / denom;
+                RealType u = (d11 * d20 - d01 * d21) * denomInv;
+                RealType w = (d00 * d21 - d01 * d20) * denomInv;
+                RealType v = static_cast<RealType>(1) - u - w;
 
-                if (u >= 0.0f && v >= 0.0f && w >= 0.0f) {
+                if (v >= static_cast<RealType>(0) && u >= static_cast<RealType>(0) && w >= static_cast<RealType>(0)) 
+                {
                     minDistSq = distSq;
-                    outNormal = normal;
-                    outPoint = proj;
+                    outNormal = faceNormal;
+                    outPoint = projected;
                     return true;
                 }
             }
@@ -129,4 +116,19 @@ inline bool checkTriangleCollision(
     return false;
 }
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using CollisionDetector = phys3d::CollisionSystem;
+    inline bool checkTriangleCollision(const phys3d::Point3& p, 
+                                        const phys3d::Point3& v0, 
+                                        const phys3d::Point3& v1, 
+                                        const phys3d::Point3& v2,
+                                        phys3d::RealType& d, 
+                                        phys3d::Point3& n, 
+                                        phys3d::Point3& pt) {
+        return phys3d::testTrianglePenetration(p, v0, v1, v2, d, n, pt);
+    }
+}
+
+#endif // PHYS3D_COLLISION_SYSTEM_HPP

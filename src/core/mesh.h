@@ -1,90 +1,71 @@
-/**
- * @file mesh.h
- * @brief Triangle mesh class with BVH acceleration support.
+/*
+ * Triangle Surface Geometry with Acceleration Structure Support
  */
-#pragma once
+#ifndef PHYS3D_GEOMETRY_SURFACE_HPP
+#define PHYS3D_GEOMETRY_SURFACE_HPP
 
 #include "common.h"
 
-namespace rigid {
+namespace phys3d {
 
-// Forward declaration
-class BVH;
+class SpatialTree;  // Forward declaration
 
-/**
- * @class Mesh
- * @brief Represents a triangle mesh with vertices, faces, and optional BVH.
+/*
+ * TriangleSurface - Stores triangulated geometry data
  */
-class Mesh {
+class TriangleSurface 
+{
 public:
-    Mesh() = default;
-    explicit Mesh(String name);
-    ~Mesh();
+    TriangleSurface() = default;
+    explicit TriangleSurface(TextType identifier);
+    ~TriangleSurface();
 
-    // Non-copyable but movable
-    Mesh(const Mesh&) = delete;
-    Mesh& operator=(const Mesh&) = delete;
-    Mesh(Mesh&&) noexcept;
-    Mesh& operator=(Mesh&&) noexcept;
+    TriangleSurface(const TriangleSurface&) = delete;
+    TriangleSurface& operator=(const TriangleSurface&) = delete;
+    TriangleSurface(TriangleSurface&&) noexcept;
+    TriangleSurface& operator=(TriangleSurface&&) noexcept;
 
-    // ========================================================================
-    // I/O Operations
-    // ========================================================================
+    /* I/O Methods */
+    bool parseWavefrontFile(const TextType& filepath, bool constructTree = true);
+    void purge();
 
-    /**
-     * @brief Load mesh from an OBJ file.
-     * @param path Path to the OBJ file.
-     * @param buildBVH Whether to build BVH after loading.
-     * @return True if loading succeeded.
-     */
-    bool loadFromOBJ(const String& path, bool buildBVH = true);
+    /* Queries */
+    [[nodiscard]] const TextType& identifier() const { return m_identifier; }
+    [[nodiscard]] const DynArray<Point3>& pointCloud() const { return m_pointCloud; }
+    [[nodiscard]] const DynArray<Triplet3i>& faceIndices() const { return m_faceIndices; }
+    [[nodiscard]] const DynArray<Point3>& faceNormals() const { return m_faceNormals; }
+    [[nodiscard]] const BoundingBox3D& localExtent() const { return m_localExtent; }
 
-    /// Clear all mesh data
-    void clear();
+    [[nodiscard]] IntType pointCount() const { return static_cast<IntType>(m_pointCloud.size()); }
+    [[nodiscard]] IntType faceCount() const { return static_cast<IntType>(m_faceIndices.size()); }
+    [[nodiscard]] bool isBlank() const { return m_pointCloud.empty(); }
 
-    // ========================================================================
-    // Accessors
-    // ========================================================================
-
-    [[nodiscard]] const String& name() const { return name_; }
-    [[nodiscard]] const Vector<Vec3>& vertices() const { return vertices_; }
-    [[nodiscard]] const Vector<Triangle>& triangles() const { return triangles_; }
-    [[nodiscard]] const Vector<Vec3>& normals() const { return normals_; }
-    [[nodiscard]] const AABB& localBounds() const { return localBounds_; }
-
-    [[nodiscard]] Int vertexCount() const { return static_cast<Int>(vertices_.size()); }
-    [[nodiscard]] Int triangleCount() const { return static_cast<Int>(triangles_.size()); }
-    [[nodiscard]] bool isEmpty() const { return vertices_.empty(); }
-
-    // ========================================================================
-    // BVH Management
-    // ========================================================================
-
-    /// Check if BVH is built and valid
-    [[nodiscard]] bool hasBVH() const;
-
-    /// Get the BVH (returns empty BVH if not built)
-    [[nodiscard]] const BVH& bvh() const;
-
-    /// Rebuild the BVH from current geometry
-    void rebuildBVH();
-
-    /// Mark BVH as needing rebuild
-    void invalidateBVH() { bvhDirty_ = true; }
+    /* Spatial Tree Access */
+    [[nodiscard]] bool hasAccelerator() const;
+    [[nodiscard]] const SpatialTree& accelerator() const;
+    void reconstructAccelerator();
+    void flagAcceleratorStale() { m_treeStale = true; }
 
 private:
-    void updateBounds();
+    void recomputeExtent();
 
-    String name_;
-    Vector<Vec3> vertices_;
-    Vector<Triangle> triangles_;
-    Vector<Vec3> normals_;
+    TextType m_identifier;
+    DynArray<Point3> m_pointCloud;
+    DynArray<Triplet3i> m_faceIndices;
+    DynArray<Point3> m_faceNormals;
 
-    AABB localBounds_;
-    bool boundsDirty_ = true;
+    BoundingBox3D m_localExtent;
+    bool m_extentStale = true;
 
-    UniquePtr<BVH> bvh_;
-    bool bvhDirty_ = true;
+    SolePtr<SpatialTree> m_spatialTree;
+    bool m_treeStale = true;
 };
 
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+    using Mesh = phys3d::TriangleSurface;
+    using BVH = phys3d::SpatialTree;
+}
+
+#endif // PHYS3D_GEOMETRY_SURFACE_HPP

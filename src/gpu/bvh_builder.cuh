@@ -1,8 +1,9 @@
-/**
- * @file bvh_builder.cuh
- * @brief GPU-accelerated BVH construction using CUDA.
+/*
+ * CUDA-Accelerated Spatial Tree Construction
  */
-#pragma once
+#ifndef PHYS3D_DEVICE_TREE_BUILDER_CUH
+#define PHYS3D_DEVICE_TREE_BUILDER_CUH
+
 #include "builtin_clz_msvc.h"
 
 #include <cuda_runtime.h>
@@ -11,124 +12,118 @@
 #include "core/common.h"
 
 #ifndef __CUDACC__
-// Fallback for non-CUDA compilation
 #include <limits>
 inline int __clz(unsigned int x) { return (x == 0) ? 32 : __builtin_clz(x); }
 #endif
 
-namespace rigid {
+namespace phys3d {
 namespace gpu {
 
-// ============================================================================
-// Device-Side Data Structures
-// ============================================================================
+/* ========== Device Data Structures ========== */
 
-/// Device-side AABB
-struct AABBDevice {
-    Float3 min;
-    Float3 max;
+struct DeviceBounds3D 
+{
+    CudaFloat3 lo;
+    CudaFloat3 hi;
 };
 
-/// Device-side BVH Node
-struct BVHNodeDevice {
-    AABBDevice bounds;
-    Int left;
-    Int right;
-    Int firstPrim;
-    Int primCount;
+struct DeviceTreeNode 
+{
+    DeviceBounds3D volume;
+    IntType leftChild;
+    IntType rightChild;
+    IntType leafStart;
+    IntType leafCount;
 
-    __host__ __device__ bool isLeaf() const { return primCount > 0; }
+    __host__ __device__ bool terminal() const { return leafCount > 0; }
 };
 
-// ============================================================================
-// Morton Code Utilities
-// ============================================================================
+/* ========== Morton Code Utilities ========== */
 
-__device__ __host__ inline UInt expandBits(UInt v) {
-    v = (v * 0x00010001u) & 0xFF0000FFu;
-    v = (v * 0x00000101u) & 0x0F00F00Fu;
-    v = (v * 0x00000011u) & 0xC30C30C3u;
-    v = (v * 0x00000005u) & 0x49249249u;
-    return v;
+__device__ __host__ inline UIntType spreadBits(UIntType val) 
+{
+    val = (val * 0x00010001u) & 0xFF0000FFu;
+    val = (val * 0x00000101u) & 0x0F00F00Fu;
+    val = (val * 0x00000011u) & 0xC30C30C3u;
+    val = (val * 0x00000005u) & 0x49249249u;
+    return val;
 }
 
-__device__ __host__ inline UInt computeMortonCode3D(float x, float y, float z) {
-    x = fminf(fmaxf(x * 1024.0f, 0.0f), 1023.0f);
-    y = fminf(fmaxf(y * 1024.0f, 0.0f), 1023.0f);
-    z = fminf(fmaxf(z * 1024.0f, 0.0f), 1023.0f);
-    UInt xx = expandBits(static_cast<UInt>(x));
-    UInt yy = expandBits(static_cast<UInt>(y));
-    UInt zz = expandBits(static_cast<UInt>(z));
-    return (xx << 2) | (yy << 1) | zz;
+__device__ __host__ inline UIntType encodeMorton(float px, float py, float pz) 
+{
+    px = fminf(fmaxf(px * 1024.0f, 0.0f), 1023.0f);
+    py = fminf(fmaxf(py * 1024.0f, 0.0f), 1023.0f);
+    pz = fminf(fmaxf(pz * 1024.0f, 0.0f), 1023.0f);
+    UIntType mx = spreadBits(static_cast<UIntType>(px));
+    UIntType my = spreadBits(static_cast<UIntType>(py));
+    UIntType mz = spreadBits(static_cast<UIntType>(pz));
+    return (mx << 2) | (my << 1) | mz;
 }
 
-/// Longest common prefix for radix tree construction
-__device__ inline int delta(const UInt* sortedCodes, int n, int i, int j) {
-    if (j < 0 || j >= n) return -1;
-    UInt ki = sortedCodes[i];
-    UInt kj = sortedCodes[j];
-    if (ki == kj) return 32 + __clz(i ^ j);
-    return __clz(ki ^ kj);
+__device__ inline int commonPrefix(const UIntType* codes, int total, int i, int j) 
+{
+    if (j < 0 || j >= total) return -1;
+    UIntType codeI = codes[i];
+    UIntType codeJ = codes[j];
+    if (codeI == codeJ) return 32 + __clz(i ^ j);
+    return __clz(codeI ^ codeJ);
 }
 
-// ============================================================================
-// BVH Builder Class
-// ============================================================================
+/* ========== Device Tree Builder Class ========== */
 
-/**
- * @class BVHBuilderGPU
- * @brief Constructs a BVH on the GPU using LBVH algorithm.
- */
-class BVHBuilderGPU {
+class DeviceTreeBuilder 
+{
 public:
-    BVHBuilderGPU();
-    ~BVHBuilderGPU();
+    DeviceTreeBuilder();
+    ~DeviceTreeBuilder();
 
-    /// Build BVH from mesh data
-    void build(const Vector<Vec3>& vertices, const Vector<Triangle>& triangles);
+    void execute(const DynArray<Point3>& pointCloud, const DynArray<Triplet3i>& faces);
+    void transferToHost(DynArray<DeviceTreeNode>& outNodes, DynArray<IntType>& outFaceOrder) const;
+    void release();
 
-    /// Copy results back to host
-    void copyToHost(Vector<BVHNodeDevice>& outNodes, Vector<Int>& outPrimIndices) const;
+    [[nodiscard]] DeviceTreeNode* nodeBuffer() const { return m_dNodes; }
+    [[nodiscard]] IntType* faceOrderBuffer() const { return m_dFaceOrder; }
+    [[nodiscard]] CudaFloat3* pointBuffer() const { return m_dPoints; }
+    [[nodiscard]] CudaInt3* faceBuffer() const { return m_dFaces; }
 
-    /// Free GPU memory
-    void free();
-
-    // Device pointer accessors
-    [[nodiscard]] BVHNodeDevice* deviceNodes() const { return dNodes_; }
-    [[nodiscard]] Int* devicePrimIndices() const { return dPrimIndices_; }
-    [[nodiscard]] Float3* deviceVertices() const { return dVertices_; }
-    [[nodiscard]] Int3* deviceTriangles() const { return dTriangles_; }
-
-    // Counts
-    [[nodiscard]] Int nodeCount() const { return numNodes_; }
-    [[nodiscard]] Int triangleCount() const { return numTriangles_; }
-    [[nodiscard]] Int vertexCount() const { return numVertices_; }
-    [[nodiscard]] Int rootIndex() const { return 0; }
+    [[nodiscard]] IntType totalNodes() const { return m_totalNodes; }
+    [[nodiscard]] IntType totalFaces() const { return m_faceCount; }
+    [[nodiscard]] IntType totalPoints() const { return m_pointCount; }
+    [[nodiscard]] IntType rootNode() const { return 0; }
 
 private:
-    void computeCentroidsBounds();
+    void computePrimitiveBounds();
     void computeMortonCodes();
-    void sortMortonCodes();
-    void buildRadixTree();
-    void computeNodeBounds();
+    void sortByMorton();
+    void constructRadixTree();
+    void propagateBounds();
 
-    // Device memory
-    Float3* dVertices_        = nullptr;
-    Int3* dTriangles_         = nullptr;
-    Float3* dCentroids_       = nullptr;
-    AABBDevice* dPrimBounds_  = nullptr;
-    UInt* dMortonCodes_       = nullptr;
-    Int* dSortedIndices_      = nullptr;
-    Int* dPrimIndices_        = nullptr;
-    BVHNodeDevice* dNodes_    = nullptr;
-    Int* dParentIndices_      = nullptr;
-    Int* dAtomicCounters_     = nullptr;
+    CudaFloat3* m_dPoints         = nullptr;
+    CudaInt3* m_dFaces            = nullptr;
+    CudaFloat3* m_dCenters        = nullptr;
+    DeviceBounds3D* m_dPrimBounds = nullptr;
+    UIntType* m_dMortonCodes      = nullptr;
+    IntType* m_dSortedIdx         = nullptr;
+    IntType* m_dFaceOrder         = nullptr;
+    DeviceTreeNode* m_dNodes      = nullptr;
+    IntType* m_dParentIdx         = nullptr;
+    IntType* m_dAtomicFlags       = nullptr;
 
-    Int numVertices_      = 0;
-    Int numTriangles_     = 0;
-    Int numInternalNodes_ = 0;
-    Int numNodes_         = 0;
+    IntType m_pointCount      = 0;
+    IntType m_faceCount       = 0;
+    IntType m_internalCount   = 0;
+    IntType m_totalNodes      = 0;
 };
 
 }  // namespace gpu
-}  // namespace rigid
+}  // namespace phys3d
+
+namespace rigid {
+namespace gpu {
+    using BVHBuilderGPU = phys3d::gpu::DeviceTreeBuilder;
+    using BVHNodeDevice = phys3d::gpu::DeviceTreeNode;
+    using AABBDevice = phys3d::gpu::DeviceBounds3D;
+}
+}
+
+#endif // PHYS3D_DEVICE_TREE_BUILDER_CUH

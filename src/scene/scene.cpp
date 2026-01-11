@@ -1,28 +1,32 @@
-/**
- * @file scene.cpp
- * @brief Implementation of the Scene class.
+/*
+ * Implementation: World class
  */
 #include "scene.h"
 
-namespace rigid {
+namespace phys3d {
 
-RigidBody& Scene::createBody(const String& name) {
-    bodies_.emplace_back(std::make_unique<RigidBody>(name));
-    return *bodies_.back();
+DynamicEntity& World::spawnEntity(const TextType& identifier) 
+{
+    m_entities.emplace_back(std::make_unique<DynamicEntity>(identifier));
+    return *m_entities.back();
 }
 
-RigidBody* Scene::body(Int index) {
-    if (index < 0 || index >= static_cast<Int>(bodies_.size())) {
+DynamicEntity* World::entity(IntType idx) 
+{
+    if (idx < 0 || idx >= static_cast<IntType>(m_entities.size())) 
+    {
         return nullptr;
     }
-    return bodies_[index].get();
+    return m_entities[idx].get();
 }
 
-const RigidBody* Scene::body(Int index) const {
-    if (index < 0 || index >= static_cast<Int>(bodies_.size())) {
+const DynamicEntity* World::entity(IntType idx) const 
+{
+    if (idx < 0 || idx >= static_cast<IntType>(m_entities.size())) 
+    {
         return nullptr;
     }
-    return bodies_[index].get();
+    return m_entities[idx].get();
 }
 
-}  // namespace rigid
+}  // namespace phys3d
