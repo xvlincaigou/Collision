@@ -63,55 +63,55 @@ Collision/
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                 simulation/SimulationController                  │
+│                 simulation/controller                            │
 │               (仿真控制/帧循环/OBJ导出)                            │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
            ┌───────────────────┼───────────────────┐
            ▼                   ▼                   ▼
 ┌─────────────────────┐ ┌─────────────────┐ ┌──────────────────────┐
-│    scene/World      │ │    physics/     │ │  core/               │
-│ (场景/刚体/边界管理) │ │  TimeIntegrator │ │  SurfaceResourcePool │
+│    scene/world      │ │    physics/     │ │  core/               │
+│ (场景/刚体/边界管理) │ │     solver      │ │    resource_pool     │
 └──────────┬──────────┘ └──────┬──────────┘ └──────────────────────┘
            │                   │
            │       ┌───────────┴───────────┐
            │       ▼                       ▼
            │ ┌─────────────────┐  ┌─────────────────────────┐
            │ │ physics/        │  │ physics/                │
-           │ │ ForceAssembler  │  │ CollisionSystem         │
+           │ │   dynamics      │  │   proximity             │
            │ │ (力的组装)       │  │ (碰撞检测调度)           │
            │ └─────────────────┘  └────────────┬────────────┘
            │                                   │
            ▼                                   ▼
 ┌─────────────────────┐            ┌───────────────────────────────┐
 │ physics/            │            │         gpu/ 模块              │
-│ DynamicEntity       │            │  ┌─────────────────────────┐  │
-│ (组件式刚体状态)     │            │  │  gpu/DeviceTreeBuilder  │  │
+│   entity            │            │  ┌─────────────────────────┐  │
+│ (组件式刚体状态)     │            │  │  gpu/tree_kernel        │  │
 └──────────┬──────────┘            │  │  (Morton码/warp归约构建) │  │
            │                       │  └─────────────────────────┘  │
            ▼                       │  ┌─────────────────────────┐  │
-┌─────────────────────┐            │  │  gpu/NarrowPhaseDetector│  │
-│  core/TriangleSurface│◄──────────│  │  (精细碰撞检测)          │  │
+┌─────────────────────┐            │  │  gpu/contact_kernel     │  │
+│  core/surface       │◄───────────│  │  (精细碰撞检测)          │  │
 │   (三角网格)         │            │  └─────────────────────────┘  │
 └──────────┬──────────┘            │  ┌─────────────────────────┐  │
-           │                       │  │  gpu/BroadPhaseDetector │  │
+           │                       │  │  gpu/sweep_kernel       │  │
            ▼                       │  │  (Sweep & Prune)        │  │
 ┌─────────────────────┐            │  └─────────────────────────┘  │
-│  accel/SpatialTree  │◄───────────└───────────────────────────────┘
+│  accel/spatial_index│◄───────────└───────────────────────────────┘
 │  (迭代式BVH构建)     │
 └─────────────────────┘
 ```
 
 ### 2.3 模块职责说明
 
-| 模块 | 主要职责 |
-|------|----------|
-| `core/` | 基础类型定义、数学工具、三角网格与资源池 |
-| `accel/` | 加速数据结构（迭代式BVH构建） |
-| `physics/` | 组件式刚体、碰撞检测、力计算、时间积分 |
-| `scene/` | 场景管理、环境边界 |
-| `simulation/` | 顶层仿真控制、帧导出 |
-| `gpu/` | CUDA 加速实现（优化的warp级操作） |
+| 模块 | 文件 | 主要职责 |
+|------|------|----------|
+| `core/` | types.h, surface.h/.cpp, resource_pool.h/.cpp | 基础类型定义、三角网格与资源池 |
+| `accel/` | spatial_index.h/.cpp | 迭代式BVH加速结构 |
+| `physics/` | material.h, entity.h/.cpp, intersection.h, proximity.h/.cpp, dynamics.h, solver.h/.cpp | 组件式刚体、碰撞检测、力计算、时间积分 |
+| `scene/` | boundary.h/.cpp, world.h/.cpp | 场景管理、环境边界 |
+| `simulation/` | controller.h/.cpp | 顶层仿真控制、帧导出 |
+| `gpu/` | tree_kernel.cu/.cuh, contact_kernel.cu/.cuh, sweep_kernel.cu/.cuh | CUDA加速（warp级优化） |
 
 ---
 
@@ -258,10 +258,10 @@ cmake --build build --config Release
 └────────┬─────────┘
          ▼
 ┌──────────────────┐
-│  EntitySpawner   │  SimulationController::createEntity()
+│  EntitySpawner   │  controller::createEntity()
 │  生成刚体对象     │
-│  - 加载网格      │  SurfaceResourcePool::fetch()
-│  - 构建 GPU BVH  │  SpatialTree::constructOnDevice()
+│  - 加载网格      │  resource_pool::fetch()
+│  - 构建 GPU BVH  │  spatial_index::constructOnDevice()
 │  - 随机物理属性  │  mass, scale, restitution, friction
 │  - 设置初始状态  │  translation, orientation, velocity
 └────────┬─────────┘
@@ -274,7 +274,7 @@ cmake --build build --config Release
 │  │     exportFrame() → OBJ 文件        │ │
 │  ├─────────────────────────────────────┤ │
 │  │  2. 更新世界包围盒                   │ │
-│  │     DynamicEntity::worldExtent()    │ │
+│  │     entity::worldExtent()           │ │
 │  ├─────────────────────────────────────┤ │
 │  │  3. 碰撞检测                        │ │
 │  │  ┌───────────────────────────────┐  │ │
@@ -316,7 +316,7 @@ cmake --build build --config Release
 #### 5.1.1 Morton 码计算（warp级优化）
 
 ```cpp
-// DeviceTreeBuilder::kernelComputePrimitiveData
+// tree_kernel.cu::kernelComputePrimitiveData
 // 使用warp级归约优化全局边界计算
 __shared__ CudaFloat3 sharedMin[32];
 __shared__ CudaFloat3 sharedMax[32];
@@ -332,7 +332,7 @@ for (int offset = 16; offset > 0; offset >>= 1) {
 #### 5.1.2 迭代式树构建（CPU版本）
 
 ```cpp
-// SpatialTree::construct() - 使用显式栈替代递归
+// spatial_index.cpp::construct() - 使用显式栈替代递归
 using WorkItem = std::tuple<IntType, IntType, IntType, bool, IntType>;
 std::stack<WorkItem> workStack;
 
@@ -389,7 +389,8 @@ __global__ void kernelPropagateBoundsBottomUp(...) {
 使用迭代式BVH遍历进行顶点-平面距离检测：
 
 ```cpp
-void CollisionSystem::traverseTreeAgainstPlane(...) {
+// proximity.cpp
+void traverseTreeAgainstPlane(...) {
     std::array<IntType, kMaxStackDepth> nodeStack;
     IntType stackTop = 0;
     nodeStack[stackTop++] = tree.rootIdx();
@@ -462,7 +463,7 @@ class DynamicEntity {
 #### 5.5.1 惩罚力计算
 
 ```cpp
-// ForceAssembler::accumulateContactForces
+// solver.cpp
 void applyForceContribution(VectorN& forceVec, IntType entityIdx,
                             const Point3& entityPos, const Point3& contactPos,
                             const Point3& force, RealType sign)

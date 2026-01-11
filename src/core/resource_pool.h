@@ -4,7 +4,7 @@
 #ifndef PHYS3D_RESOURCE_POOL_HPP
 #define PHYS3D_RESOURCE_POOL_HPP
 
-#include "common.h"
+#include "types.h"
 
 #include <mutex>
 #include <unordered_map>

@@ -4,10 +4,10 @@
 #ifndef PHYS3D_COLLISION_SYSTEM_HPP
 #define PHYS3D_COLLISION_SYSTEM_HPP
 
-#include "contact.h"
-#include "core/common.h"
-#include "scene/scene.h"
-#include "accel/bvh.h"
+#include "intersection.h"
+#include "core/types.h"
+#include "scene/world.h"
+#include "accel/spatial_index.h"
 
 namespace phys3d {
 

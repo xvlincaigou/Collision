@@ -1,7 +1,7 @@
 /*
  * Implementation: SimulationController class
  */
-#include "simulator.h"
+#include "controller.h"
 
 #include <fstream>
 #include <sstream>

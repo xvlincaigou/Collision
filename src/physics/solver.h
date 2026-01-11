@@ -4,10 +4,10 @@
 #ifndef PHYS3D_TIME_INTEGRATOR_HPP
 #define PHYS3D_TIME_INTEGRATOR_HPP
 
-#include "collision_detector.h"
-#include "force_builder.h"
-#include "core/common.h"
-#include "scene/scene.h"
+#include "proximity.h"
+#include "dynamics.h"
+#include "core/types.h"
+#include "scene/world.h"
 
 namespace phys3d {
 

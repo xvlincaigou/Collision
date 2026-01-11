@@ -14,7 +14,7 @@
 #include <functional>
 #include <array>
 
-#include "simulation/simulator.h"
+#include "simulation/controller.h"
 
 namespace {
 

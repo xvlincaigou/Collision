@@ -2,7 +2,7 @@
  * Implementation: ForceAssembler and TimeIntegrator classes
  * Restructured with helper functions and modified control flow
  */
-#include "integrator.h"
+#include "solver.h"
 
 #include <iostream>
 #include <functional>

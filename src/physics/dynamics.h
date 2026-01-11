@@ -4,9 +4,9 @@
 #ifndef PHYS3D_FORCE_ASSEMBLER_HPP
 #define PHYS3D_FORCE_ASSEMBLER_HPP
 
-#include "contact.h"
-#include "core/common.h"
-#include "scene/scene.h"
+#include "intersection.h"
+#include "core/types.h"
+#include "scene/world.h"
 
 namespace phys3d {
 

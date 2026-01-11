@@ -2,14 +2,14 @@
  * Implementation: SpatialTree class
  * Uses iterative construction with explicit stack instead of recursion
  */
-#include "bvh.h"
+#include "spatial_index.h"
 
 #include <numeric>
 #include <stack>
 #include <tuple>
 
 #if defined(RIGID_USE_CUDA)
-#include "gpu/bvh_builder.cuh"
+#include "gpu/tree_kernel.cuh"
 #endif
 
 namespace phys3d {

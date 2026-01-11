@@ -2,7 +2,7 @@
  * Implementation: CollisionSystem class
  * Uses iterative BVH traversal and restructured detection pipeline
  */
-#include "collision_detector.h"
+#include "proximity.h"
 
 #include <cmath>
 #include <iostream>
@@ -10,8 +10,8 @@
 #include <array>
 
 #if defined(RIGID_USE_CUDA)
-#include "gpu/collision_detector.cuh"
-#include "gpu/broadphase.cuh"
+#include "gpu/contact_kernel.cuh"
+#include "gpu/sweep_kernel.cuh"
 #endif
 
 namespace phys3d {

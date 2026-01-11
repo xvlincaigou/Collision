@@ -4,12 +4,12 @@
 #ifndef PHYS3D_DEVICE_TREE_BUILDER_CUH
 #define PHYS3D_DEVICE_TREE_BUILDER_CUH
 
-#include "builtin_clz_msvc.h"
+#include "msvc_intrinsics.h"
 
 #include <cuda_runtime.h>
 #include <vector>
 
-#include "core/common.h"
+#include "core/types.h"
 
 #ifndef __CUDACC__
 #include <limits>

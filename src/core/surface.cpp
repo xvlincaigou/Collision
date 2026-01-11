@@ -1,8 +1,8 @@
 /*
  * Implementation: TriangleSurface class
  */
-#include "mesh.h"
-#include "accel/bvh.h"
+#include "surface.h"
+#include "accel/spatial_index.h"
 
 #include <fstream>
 #include <sstream>

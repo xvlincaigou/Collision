@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstdio>
 
-#include "broadphase.cuh"
+#include "sweep_kernel.cuh"
 
 namespace phys3d {
 namespace gpu {

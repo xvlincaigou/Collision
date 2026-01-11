@@ -2,8 +2,8 @@
  * Implementation: DynamicEntity class
  * Restructured with component-based operations
  */
-#include "rigid_body.h"
-#include "core/mesh_cache.h"
+#include "entity.h"
+#include "core/resource_pool.h"
 
 namespace phys3d {
 

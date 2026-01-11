@@ -7,7 +7,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-#include "core/common.h"
+#include "core/types.h"
 
 namespace phys3d {
 namespace gpu {

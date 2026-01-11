@@ -1,7 +1,7 @@
 /*
  * Implementation: World class
  */
-#include "scene.h"
+#include "world.h"
 
 namespace phys3d {
 

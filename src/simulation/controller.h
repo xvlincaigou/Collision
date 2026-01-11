@@ -4,10 +4,10 @@
 #ifndef PHYS3D_SIMULATION_CONTROLLER_HPP
 #define PHYS3D_SIMULATION_CONTROLLER_HPP
 
-#include "core/common.h"
-#include "core/mesh_cache.h"
-#include "physics/integrator.h"
-#include "scene/scene.h"
+#include "core/types.h"
+#include "core/resource_pool.h"
+#include "physics/solver.h"
+#include "scene/world.h"
 
 namespace phys3d {
 

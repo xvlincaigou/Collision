@@ -4,7 +4,7 @@
 #ifndef PHYS3D_CONTACT_INFO_HPP
 #define PHYS3D_CONTACT_INFO_HPP
 
-#include "core/common.h"
+#include "core/types.h"
 
 namespace phys3d {
 

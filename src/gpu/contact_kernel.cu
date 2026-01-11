@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <algorithm>
 
-#include "collision_detector.cuh"
+#include "contact_kernel.cuh"
 
 namespace phys3d {
 namespace gpu {

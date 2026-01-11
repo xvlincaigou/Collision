@@ -1,7 +1,7 @@
 /*
  * Implementation: Boundaries class
  */
-#include "environment.h"
+#include "boundary.h"
 
 namespace phys3d {
 

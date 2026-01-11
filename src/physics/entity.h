@@ -5,9 +5,9 @@
 #ifndef PHYS3D_DYNAMIC_ENTITY_HPP
 #define PHYS3D_DYNAMIC_ENTITY_HPP
 
-#include "body_properties.h"
-#include "core/common.h"
-#include "core/mesh.h"
+#include "material.h"
+#include "core/types.h"
+#include "core/surface.h"
 
 namespace phys3d {
 

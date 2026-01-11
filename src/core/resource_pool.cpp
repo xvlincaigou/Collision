@@ -1,9 +1,9 @@
 /*
  * Implementation: SurfaceResourcePool class
  */
-#include "mesh_cache.h"
-#include "mesh.h"
-#include "accel/bvh.h"
+#include "resource_pool.h"
+#include "surface.h"
+#include "accel/spatial_index.h"
 
 namespace phys3d {
 

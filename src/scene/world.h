@@ -4,9 +4,9 @@
 #ifndef PHYS3D_WORLD_HPP
 #define PHYS3D_WORLD_HPP
 
-#include "core/common.h"
-#include "environment.h"
-#include "physics/rigid_body.h"
+#include "core/types.h"
+#include "boundary.h"
+#include "physics/entity.h"
 
 namespace phys3d {
 

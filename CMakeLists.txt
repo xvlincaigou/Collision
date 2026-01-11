@@ -40,33 +40,33 @@ endif()
 # ============================================================================
 
 set(CORE_SOURCES
-    src/core/mesh.cpp
-    src/core/mesh_cache.cpp
+    src/core/surface.cpp
+    src/core/resource_pool.cpp
 )
 
 set(ACCEL_SOURCES
-    src/accel/bvh.cpp
+    src/accel/spatial_index.cpp
 )
 
 set(PHYSICS_SOURCES
-    src/physics/rigid_body.cpp
-    src/physics/collision_detector.cpp
-    src/physics/integrator.cpp
+    src/physics/entity.cpp
+    src/physics/proximity.cpp
+    src/physics/solver.cpp
 )
 
 set(SCENE_SOURCES
-    src/scene/environment.cpp
-    src/scene/scene.cpp
+    src/scene/boundary.cpp
+    src/scene/world.cpp
 )
 
 set(SIMULATION_SOURCES
-    src/simulation/simulator.cpp
+    src/simulation/controller.cpp
 )
 
 set(CUDA_SOURCES
-    src/gpu/bvh_builder.cu
-    src/gpu/broadphase.cu
-    src/gpu/collision_detector.cu
+    src/gpu/tree_kernel.cu
+    src/gpu/sweep_kernel.cu
+    src/gpu/contact_kernel.cu
 )
 
 set(ALL_SOURCES

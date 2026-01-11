@@ -4,7 +4,7 @@
 #ifndef PHYS3D_GEOMETRY_SURFACE_HPP
 #define PHYS3D_GEOMETRY_SURFACE_HPP
 
-#include "common.h"
+#include "types.h"
 
 namespace phys3d {
 

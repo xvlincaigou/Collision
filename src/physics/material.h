@@ -4,7 +4,7 @@
 #ifndef PHYS3D_MATERIAL_PROPS_HPP
 #define PHYS3D_MATERIAL_PROPS_HPP
 
-#include "core/common.h"
+#include "core/types.h"
 
 namespace phys3d {
 

@@ -6,9 +6,9 @@
 
 #include <cuda_runtime.h>
 
-#include "bvh_builder.cuh"
-#include "broadphase.cuh"
-#include "core/common.h"
+#include "tree_kernel.cuh"
+#include "sweep_kernel.cuh"
+#include "core/types.h"
 
 namespace phys3d {
 namespace gpu {

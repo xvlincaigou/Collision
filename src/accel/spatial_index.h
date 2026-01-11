@@ -4,7 +4,7 @@
 #ifndef PHYS3D_SPATIAL_TREE_HPP
 #define PHYS3D_SPATIAL_TREE_HPP
 
-#include "core/common.h"
+#include "core/types.h"
 
 #include <algorithm>
 #include <cstdint>

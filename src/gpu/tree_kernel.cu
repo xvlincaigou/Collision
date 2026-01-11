@@ -8,7 +8,7 @@
 #include <thrust/gather.h>
 #include <cstdio>
 
-#include "bvh_builder.cuh"
+#include "tree_kernel.cuh"
 
 namespace phys3d {
 namespace gpu {
